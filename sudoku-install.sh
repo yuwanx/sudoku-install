@@ -117,10 +117,12 @@ PY
 }
 
 choose_port() {
-  local requested=${1:-} range_low=$2 range_high=$3 label=$4
+  local requested=${1:-} range_low=$2 range_high=$3 label=$4 allowed_in_use=${5:-}
   if [[ -n $requested ]]; then
     is_valid_port "$requested" || die "${label}端口无效：${requested}"
-    port_in_use "$requested" && die "${label}端口已占用：${requested}"
+    if port_in_use "$requested" && [[ $requested != "$allowed_in_use" ]]; then
+      die "${label}端口已占用：${requested}"
+    fi
     printf '%s\n' "$requested"
   else
     random_port "$range_low" "$range_high" || die "找不到可用的${label}端口"
@@ -515,10 +517,15 @@ show_result() {
 }
 
 install_all() {
+  local previous_sudoku_port="" previous_subscription_port=""
   require_root; detect_arch; install_dependencies
   backup_existing
-  SUDOKU_PORT=$(choose_port "${SUDOKU_PORT:-}" 20000 50000 "Sudoku")
-  SUBSCRIPTION_PORT=$(choose_port "${SUBSCRIPTION_PORT:-}" 10000 19999 "订阅")
+  if [[ -r $STATE_FILE ]]; then
+    previous_sudoku_port=$(sed -n 's/^SUDOKU_PORT=//p' "$STATE_FILE" | head -n1)
+    previous_subscription_port=$(sed -n 's/^SUBSCRIPTION_PORT=//p' "$STATE_FILE" | head -n1)
+  fi
+  SUDOKU_PORT=$(choose_port "${SUDOKU_PORT:-}" 20000 50000 "Sudoku" "$previous_sudoku_port")
+  SUBSCRIPTION_PORT=$(choose_port "${SUBSCRIPTION_PORT:-}" 10000 19999 "订阅" "$previous_subscription_port")
   [[ $SUDOKU_PORT != "$SUBSCRIPTION_PORT" ]] || die "两个端口不可相同"
   PUBLIC_IP=$(get_public_ip)
   SUBSCRIPTION_TOKEN=$(generate_token)
