@@ -176,6 +176,12 @@ download_binary() {
   [[ $url == https://github.com/* ]] || die "下载地址异常"
   [[ $digest =~ ^[0-9a-fA-F]{64}$ ]] || die "GitHub Release 未提供 SHA-256 摘要"
 
+  if [[ ${SUDOKU_FORCE_DOWNLOAD:-0} != 1 && -x $BIN && -r $VERSION_FILE ]] \
+    && [[ $(<"$VERSION_FILE") == "$version" ]]; then
+    ok "已安装最新版本 ${version}，复用现有已校验二进制"
+    return 0
+  fi
+
   tmp=$(mktemp -d)
   info "下载 Sudoku ${version}（linux-${ARCH}）"
   curl -fL --retry 3 --connect-timeout 15 --max-time 180 -o "${tmp}/sudoku.tar.gz" "$url"
@@ -586,7 +592,6 @@ install_all() {
     previous_sudoku_port=$(sed -n 's/^SUDOKU_PORT=//p' "$STATE_FILE" | head -n1)
     previous_subscription_port=$(sed -n 's/^SUBSCRIPTION_PORT=//p' "$STATE_FILE" | head -n1)
   fi
-  systemctl disable --now "$MSS_SERVICE" >/dev/null 2>&1 || true
   SUDOKU_PORT=$(choose_port "${SUDOKU_PORT:-}" 20000 50000 "Sudoku" "$previous_sudoku_port")
   SUBSCRIPTION_PORT=$(choose_port "${SUBSCRIPTION_PORT:-}" 10000 19999 "订阅" "$previous_subscription_port")
   [[ $SUDOKU_PORT != "$SUBSCRIPTION_PORT" ]] || die "两个端口不可相同"
@@ -603,6 +608,7 @@ install_all() {
   write_state
   write_server_config
   write_sudoku_service
+  systemctl disable --now "$MSS_SERVICE" >/dev/null 2>&1 || true
   write_mss_service
   write_client_exports
   write_web_service
