@@ -252,7 +252,7 @@ write_server_config() {
   "padding_min": 2,
   "padding_max": 7,
   "ascii": "${DEFAULT_ASCII}",
-  "enable_pure_downlink": false,
+  "enable_pure_downlink": true,
   "multiplex": "off",
   "httpmask": {
     "disable": true,
@@ -309,7 +309,7 @@ write_client_exports() {
   "padding_min": 2,
   "padding_max": 7,
   "ascii": "${DEFAULT_ASCII}",
-  "enable_pure_downlink": false,
+  "enable_pure_downlink": true,
   "multiplex": "off",
   "httpmask": {
     "disable": true,
@@ -350,7 +350,7 @@ proxies:
       host: ""
       path-root: "${HTTPMASK_PATH_ROOT}"
       multiplex: "off"
-    enable-pure-downlink: false
+    enable-pure-downlink: true
 
 proxy-groups:
   - name: Proxy
