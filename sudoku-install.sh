@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.3.0"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly ETC_DIR="/etc/sudoku"
@@ -24,6 +24,12 @@ readonly WEB_SERVICE="sudoku-subscription.service"
 readonly MSS_SERVICE="sudoku-mss.service"
 readonly MSS_SCRIPT="/usr/local/lib/sudoku-mss"
 readonly CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/sudoku-subscription"
+readonly LEGO_BIN="/usr/local/bin/lego"
+readonly LEGO_DIR="${ETC_DIR}/lego"
+readonly LEGO_RENEW_SCRIPT="/usr/local/lib/sudoku-lego-renew"
+readonly LEGO_RENEW_SERVICE="sudoku-lego-renew.service"
+readonly LEGO_RENEW_TIMER="sudoku-lego-renew.timer"
+readonly LEGO_VERSION="5.4.1"
 readonly BACKUP_ROOT="/var/backups/sudoku-install"
 readonly DEFAULT_FALLBACK="${SUDOKU_FALLBACK:-127.0.0.1:80}"
 readonly DEFAULT_AEAD="chacha20-poly1305"
@@ -254,6 +260,7 @@ TCP_MSS=${TCP_MSS}
 SUBSCRIPTION_SCHEME=${SUBSCRIPTION_SCHEME}
 TLS_CERT_FILE=${TLS_CERT_FILE}
 TLS_KEY_FILE=${TLS_KEY_FILE}
+ACME_METHOD=${ACME_METHOD}
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -397,6 +404,86 @@ install_current_certbot() {
   certbot_is_current || die "Certbot 版本低于 5.4"
 }
 
+install_lego() {
+  local digest tmp actual
+  if [[ -x $LEGO_BIN ]] && "$LEGO_BIN" --version 2>/dev/null | grep -q "version ${LEGO_VERSION}"; then
+    return 0
+  fi
+  case "$ARCH" in
+    amd64) digest="ebb33f1bead5a7c99dd46f1c5734b44cf1eab5b5c12faf397cd14d50a5916419" ;;
+    arm64) digest="8494c06bde449ac4d65c726b7ea50d67ac61f422e698c9b78b47778445b098f2" ;;
+    *) die "Lego 不支持当前架构：$ARCH" ;;
+  esac
+  tmp=$(mktemp -d)
+  info "安装 Lego ${LEGO_VERSION}，用于 443/tcp TLS-ALPN-01 验证"
+  curl -fL --retry 3 --connect-timeout 15 --max-time 180 \
+    -o "${tmp}/lego.tar.gz" \
+    "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_${ARCH}.tar.gz"
+  actual=$(sha256sum "${tmp}/lego.tar.gz" | awk '{print $1}')
+  [[ ${actual,,} == "$digest" ]] || { rm -rf "$tmp"; die "Lego SHA-256 校验失败"; }
+  tar -xzf "${tmp}/lego.tar.gz" -C "$tmp" lego
+  install -m 0755 "${tmp}/lego" "$LEGO_BIN"
+  rm -rf "$tmp"
+}
+
+issue_lego_ip_certificate() {
+  port_in_use 443 && die "80/tcp 的 Webroot 不可用且 443/tcp 也已占用"
+  install_lego
+  open_firewall_port 443
+  mkdir -p "$LEGO_DIR"
+  info "通过 443/tcp TLS-ALPN-01 申请受信任的公网 IP 证书"
+  "$LEGO_BIN" run --path "$LEGO_DIR" --accept-tos \
+    --email="${SUDOKU_ACME_EMAIL:-}" --server letsencrypt \
+    --domains "$PUBLIC_IP" --profile shortlived --tls
+  TLS_CERT_FILE="${LEGO_DIR}/certificates/${PUBLIC_IP}.crt"
+  TLS_KEY_FILE="${LEGO_DIR}/certificates/${PUBLIC_IP}.key"
+  ACME_METHOD=lego
+}
+
+write_lego_renewal_service() {
+  cat > "$LEGO_RENEW_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source ${STATE_FILE}
+openssl x509 -checkend 172800 -noout -in "\$TLS_CERT_FILE" >/dev/null 2>&1 && exit 0
+stopped=()
+if [[ \${SUDOKU_PORT:-0} == 443 ]] && systemctl is-active --quiet ${SUDOKU_SERVICE}; then
+  systemctl stop ${SUDOKU_SERVICE}; stopped+=(${SUDOKU_SERVICE})
+fi
+if [[ \${SUBSCRIPTION_PORT:-0} == 443 ]] && systemctl is-active --quiet ${WEB_SERVICE}; then
+  systemctl stop ${WEB_SERVICE}; stopped+=(${WEB_SERVICE})
+fi
+restore() { for service in "\${stopped[@]}"; do systemctl start "\$service"; done; }
+trap restore EXIT
+${LEGO_BIN} run --path ${LEGO_DIR} --accept-tos --email="${SUDOKU_ACME_EMAIL:-}" \
+  --server letsencrypt --domains "\$PUBLIC_IP" --profile shortlived --tls
+systemctl try-restart ${WEB_SERVICE}
+EOF
+  chmod 755 "$LEGO_RENEW_SCRIPT"
+  cat > "/etc/systemd/system/${LEGO_RENEW_SERVICE}" <<EOF
+[Unit]
+Description=Renew Sudoku IP certificate using TLS-ALPN-01
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${LEGO_RENEW_SCRIPT}
+EOF
+  cat > "/etc/systemd/system/${LEGO_RENEW_TIMER}" <<EOF
+[Unit]
+Description=Daily Sudoku IP certificate renewal check
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 discover_certbot_webroot() {
   local requested=${SUDOKU_CERTBOT_WEBROOT:-} root probe token body
   local candidates=()
@@ -426,6 +513,7 @@ discover_certbot_webroot() {
 setup_tls() {
   local webroot=""
   SUBSCRIPTION_SCHEME=https
+  ACME_METHOD=self-signed
   if [[ $DEFAULT_TLS_MODE == self-signed ]]; then
     local cert_dir="${ETC_DIR}/tls"
     mkdir -p "$cert_dir"
@@ -440,30 +528,38 @@ setup_tls() {
   fi
   [[ $DEFAULT_TLS_MODE == letsencrypt ]] || die "SUDOKU_TLS_MODE 仅支持 letsencrypt/self-signed"
   [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IP 证书模式当前需要 IPv4 地址"
-  install_current_certbot
   TLS_CERT_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/fullchain.pem"
   TLS_KEY_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/privkey.pem"
   open_firewall_port 80
-  if [[ ! -s $TLS_CERT_FILE || ! -s $TLS_KEY_FILE ]] || ! openssl x509 -checkend 43200 -noout -in "$TLS_CERT_FILE"; then
-    if port_in_use 80; then
-      webroot=$(discover_certbot_webroot || true)
-      [[ -n $webroot ]] || die "80/tcp 已占用且未找到可用 Webroot；请设置 SUDOKU_CERTBOT_WEBROOT=站点根目录 后重试"
+  if [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] && openssl x509 -checkend 43200 -noout -in "$TLS_CERT_FILE" >/dev/null; then
+    ACME_METHOD=certbot
+  elif ! port_in_use 80; then
+    install_current_certbot
+    info "向 Let's Encrypt 申请受信任的公网 IP 短期证书"
+    "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
+      --preferred-profile shortlived --standalone --ip-address "$PUBLIC_IP"
+    ACME_METHOD=certbot
+  else
+    webroot=$(discover_certbot_webroot || true)
+    if [[ -n $webroot ]]; then
+      install_current_certbot
       info "复用现有 Web 服务进行证书验证，Webroot：${webroot}"
       "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
         --preferred-profile shortlived --webroot --webroot-path "$webroot" --ip-address "$PUBLIC_IP"
+      ACME_METHOD=certbot
     else
-      info "向 Let's Encrypt 申请受信任的公网 IP 短期证书"
-      "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
-        --preferred-profile shortlived --standalone --ip-address "$PUBLIC_IP"
+      issue_lego_ip_certificate
     fi
   fi
-  [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] || die "证书文件生成失败"
-  mkdir -p "$(dirname "$CERTBOT_HOOK")"
-  cat > "$CERTBOT_HOOK" <<EOF
+  if [[ $ACME_METHOD == certbot ]]; then
+    mkdir -p "$(dirname "$CERTBOT_HOOK")"
+    cat > "$CERTBOT_HOOK" <<EOF
 #!/usr/bin/env bash
 systemctl try-restart ${WEB_SERVICE}
 EOF
-  chmod 755 "$CERTBOT_HOOK"
+    chmod 755 "$CERTBOT_HOOK"
+  fi
+  [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] || die "证书文件生成失败"
   ok "公网 IP HTTPS 证书有效期至：$(openssl x509 -enddate -noout -in "$TLS_CERT_FILE" | cut -d= -f2-)"
 }
 
@@ -739,8 +835,16 @@ install_all() {
   write_mss_service
   write_client_exports
   write_web_service
+  if [[ $ACME_METHOD == lego ]]; then
+    write_lego_renewal_service
+  else
+    systemctl disable --now "$LEGO_RENEW_TIMER" >/dev/null 2>&1 || true
+  fi
   systemctl daemon-reload
   systemctl enable "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null
+  if [[ $ACME_METHOD == lego ]]; then
+    systemctl enable --now "$LEGO_RENEW_TIMER" >/dev/null
+  fi
   systemctl restart "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE"
   wait_listen "$SUDOKU_PORT" || { journalctl -u "$SUDOKU_SERVICE" -n 30 --no-pager; die "Sudoku 未监听端口"; }
   wait_listen "$SUBSCRIPTION_PORT" || { journalctl -u "$WEB_SERVICE" -n 30 --no-pager; die "订阅服务未监听端口"; }
@@ -798,8 +902,8 @@ show_logs() {
 uninstall_all() {
   require_root
   load_state || true
-  systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" "$MSS_SERVICE" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "$MSS_SCRIPT" "$CERTBOT_HOOK" "$BIN"
+  systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" "$MSS_SERVICE" "$LEGO_RENEW_TIMER" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_TIMER}" "$MSS_SCRIPT" "$LEGO_RENEW_SCRIPT" "$CERTBOT_HOOK" "$LEGO_BIN" "$BIN"
   rm -rf "$ETC_DIR" "$WEB_APP_DIR"
   systemctl daemon-reload
   if [[ -n ${SUDOKU_PORT:-} ]] && command -v ufw >/dev/null 2>&1; then ufw delete allow "${SUDOKU_PORT}/tcp" >/dev/null 2>&1 || true; fi

@@ -30,6 +30,7 @@
 - **受信任的 IP HTTPS**：通过 Certbot 5.4+ 自动申请 Let's Encrypt 公网 IP 短期证书。
 - **自动续期**：启用 Certbot 定时器，续期后自动重载订阅服务。
 - **兼容新装 snapd**：主动识别 `/snap/bin/certbot`，当前终端无需重新登录或刷新 PATH。
+- **双 ACME 验证路径**：80 端口不可用时自动改走 443/tcp 的 TLS-ALPN-01，无需停掉 80 上的网站。
 - **扫码与订阅导入**：输出 Mihomo YAML、订阅 URL、网页二维码和一键导入链接。
 - **配置预检**：启动前调用 Sudoku 自带的 `-test` 校验服务端与客户端配置。
 - **服务托管**：创建 `sudoku.service`、`sudoku-subscription.service` 和 `sudoku-mss.service`。
@@ -177,7 +178,7 @@ curl -I "https://SERVER_IP:SUBSCRIPTION_PORT/RANDOM_TOKEN/config.yaml"
 journalctl -u sudoku -u sudoku-subscription -n 100 --no-pager
 ```
 
-如果 80 端口已由 Nginx、Apache 或 OpenResty 使用，脚本会依次探测常见 Webroot，并改用不中断现有站点的 Webroot 验证。无法自动识别时可指定实际站点根目录：
+如果 80 端口已由 Nginx、Apache 或 OpenResty 使用，脚本会依次探测常见 Webroot；探测失败但 443 端口空闲时，会自动使用 Lego 的 TLS-ALPN-01 验证申请同样受信任的 IP 证书。两条路径都不需要关闭 80 上的网站。
 
 ```bash
 SUDOKU_CERTBOT_WEBROOT=/var/www/html bash <(fetch_sudoku_installer) install
