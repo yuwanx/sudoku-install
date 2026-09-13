@@ -253,8 +253,8 @@ write_server_config() {
   "enable_pure_downlink": false,
   "multiplex": "off",
   "httpmask": {
-    "disable": false,
-    "mode": "ws",
+    "disable": true,
+    "mode": "legacy",
     "tls": false,
     "host": "",
     "path_root": "${HTTPMASK_PATH_ROOT}",
@@ -310,8 +310,8 @@ write_client_exports() {
   "enable_pure_downlink": false,
   "multiplex": "off",
   "httpmask": {
-    "disable": false,
-    "mode": "ws",
+    "disable": true,
+    "mode": "legacy",
     "tls": false,
     "host": "",
     "path_root": "${HTTPMASK_PATH_ROOT}",
@@ -342,8 +342,8 @@ proxies:
     table-type: ${DEFAULT_ASCII}
     multiplex: "off"
     httpmask:
-      disable: false
-      mode: ws
+      disable: true
+      mode: legacy
       tls: false
       host: ""
       path-root: "${HTTPMASK_PATH_ROOT}"
@@ -522,7 +522,7 @@ install_all() {
   [[ $SUDOKU_PORT != "$SUBSCRIPTION_PORT" ]] || die "两个端口不可相同"
   PUBLIC_IP=$(get_public_ip)
   SUBSCRIPTION_TOKEN=$(generate_token)
-  HTTPMASK_PATH_ROOT=$(generate_path_root)
+  HTTPMASK_PATH_ROOT=""
   mkdir -p "$ETC_DIR" "$WEB_ROOT"
   download_binary
   generate_keys

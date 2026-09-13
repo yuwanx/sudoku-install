@@ -56,7 +56,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/s
 ## 设计说明
 
 - 下载 GitHub 最新 Release，并核对 GitHub Release API 给出的 SHA-256；
-- 服务端与 Mihomo 导出统一使用 `ws` HTTPMask、相同的 `path-root` 和下行模式；
+- 默认使用直接 Sudoku TCP 传输，服务端与 Mihomo 导出的 HTTPMask、下行模式保持一致；
 - 启动前使用 Sudoku 自带 `-test` 校验服务端与客户端配置；
 - 订阅 Web 服务只响应随机令牌路径，不开放目录列表；
 - systemd 服务自动重启并启用基础沙箱限制；
