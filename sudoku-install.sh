@@ -541,7 +541,8 @@ install_all() {
   write_client_exports
   write_web_service
   systemctl daemon-reload
-  systemctl enable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null
+  systemctl enable "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null
+  systemctl restart "$SUDOKU_SERVICE" "$WEB_SERVICE"
   wait_listen "$SUDOKU_PORT" || { journalctl -u "$SUDOKU_SERVICE" -n 30 --no-pager; die "Sudoku 未监听端口"; }
   wait_listen "$SUBSCRIPTION_PORT" || { journalctl -u "$WEB_SERVICE" -n 30 --no-pager; die "订阅服务未监听端口"; }
   curl -fsS --max-time 5 "http://127.0.0.1:${SUBSCRIPTION_PORT}/healthz" | grep -qx ok || die "订阅服务健康检查失败"
