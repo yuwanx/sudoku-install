@@ -526,6 +526,8 @@ install_all() {
   mkdir -p "$ETC_DIR" "$WEB_ROOT"
   download_binary
   generate_keys
+  # shellcheck disable=SC1090
+  source "$KEYS_FILE"
   write_state
   write_server_config
   write_sudoku_service
