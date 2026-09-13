@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.3.1"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly ETC_DIR="/etc/sudoku"
@@ -14,6 +14,7 @@ readonly KEYS_FILE="${ETC_DIR}/keys.env"
 readonly STATE_FILE="${ETC_DIR}/install.env"
 readonly CLIENT_FILE="${ETC_DIR}/client.config.json"
 readonly MIHOMO_FILE="${ETC_DIR}/mihomo.yaml"
+readonly EXTERNAL_QR_FILE="${ETC_DIR}/external-qr.url"
 readonly VERSION_FILE="${ETC_DIR}/version"
 readonly WEB_ROOT="${ETC_DIR}/subscription"
 readonly WEB_ENV="${ETC_DIR}/subscription.env"
@@ -258,6 +259,7 @@ PUBLIC_IP=${PUBLIC_IP}
 HTTPMASK_PATH_ROOT=${HTTPMASK_PATH_ROOT}
 TCP_MSS=${TCP_MSS}
 SUBSCRIPTION_SCHEME=${SUBSCRIPTION_SCHEME}
+SUBSCRIPTION_MODE=${SUBSCRIPTION_MODE}
 TLS_CERT_FILE=${TLS_CERT_FILE}
 TLS_KEY_FILE=${TLS_KEY_FILE}
 ACME_METHOD=${ACME_METHOD}
@@ -513,6 +515,7 @@ discover_certbot_webroot() {
 setup_tls() {
   local webroot=""
   SUBSCRIPTION_SCHEME=https
+  SUBSCRIPTION_MODE=https
   ACME_METHOD=self-signed
   if [[ $DEFAULT_TLS_MODE == self-signed ]]; then
     local cert_dir="${ETC_DIR}/tls"
@@ -528,6 +531,15 @@ setup_tls() {
   fi
   [[ $DEFAULT_TLS_MODE == letsencrypt ]] || die "SUDOKU_TLS_MODE 仅支持 letsencrypt/self-signed"
   [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IP 证书模式当前需要 IPv4 地址"
+  if port_in_use 80 && port_in_use 443; then
+    SUBSCRIPTION_MODE=external-qr
+    SUBSCRIPTION_SCHEME=external
+    TLS_CERT_FILE=""
+    TLS_KEY_FILE=""
+    ACME_METHOD=external-qr
+    warn "检测到 80/tcp 与 443/tcp 均已占用，使用 api.qrserver.com 生成 sudoku:// 导入二维码"
+    return 0
+  fi
   TLS_CERT_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/fullchain.pem"
   TLS_KEY_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/privkey.pem"
   open_firewall_port 80
@@ -548,6 +560,15 @@ setup_tls() {
         --preferred-profile shortlived --webroot --webroot-path "$webroot" --ip-address "$PUBLIC_IP"
       ACME_METHOD=certbot
     else
+      if port_in_use 443; then
+        SUBSCRIPTION_MODE=external-qr
+        SUBSCRIPTION_SCHEME=external
+        TLS_CERT_FILE=""
+        TLS_KEY_FILE=""
+        ACME_METHOD=external-qr
+        warn "80/tcp 与 443/tcp 均已占用，使用 api.qrserver.com 生成 sudoku:// 导入二维码"
+        return 0
+      fi
       issue_lego_ip_certificate
     fi
   fi
@@ -564,9 +585,8 @@ EOF
 }
 
 write_client_exports() {
-  local server_address subscription_url clash_url
+  local server_address subscription_url="" clash_url encoded
   server_address="${PUBLIC_IP}:${SUDOKU_PORT}"
-  subscription_url="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
 
   cat > "$CLIENT_FILE" <<EOF
 {
@@ -635,6 +655,21 @@ EOF
 
   SHORT_LINK=$($BIN -c "$CLIENT_FILE" -export-link 2>&1 | grep -Eo 'sudoku://[^[:space:]]+' | tail -n1)
   [[ -n $SHORT_LINK ]] || die "生成 sudoku:// 链接失败"
+
+  if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
+    encoded=$(python3 - "$SHORT_LINK" <<'PY'
+import sys, urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+)
+    printf 'https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=%s\n' "$encoded" > "$EXTERNAL_QR_FILE"
+    chmod 600 "$EXTERNAL_QR_FILE"
+    rm -rf "$WEB_ROOT"
+    return 0
+  fi
+
+  rm -f "$EXTERNAL_QR_FILE"
+  subscription_url="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
 
   mkdir -p "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}"
   install -m 0600 "$MIHOMO_FILE" "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/config.yaml"
@@ -793,16 +828,27 @@ wait_listen() {
 
 show_result() {
   load_state || die "安装状态文件缺失"
-  local page="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/"
-  local sub="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
+  local page sub qr_url
   printf '\n%b════════ Sudoku 安装结果 ════════%b\n' "$CYAN" "$RESET"
   printf '版本:       %s\n' "$(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
   printf '服务端口:   %s/tcp\n' "$SUDOKU_PORT"
-  printf '扫码页面:   %s\n' "$page"
-  printf '订阅链接:   %s\n' "$sub"
+  if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
+    qr_url=$(cat "$EXTERNAL_QR_FILE" 2>/dev/null || true)
+    printf '导入方式:   外部 HTTPS 二维码（二维码内容为 sudoku:// 原生短链）\n'
+    printf '二维码图片: %s\n' "$qr_url"
+  else
+    page="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/"
+    sub="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
+    printf '扫码页面:   %s\n' "$page"
+    printf '订阅链接:   %s\n' "$sub"
+  fi
   printf 'Mihomo YAML: %s\n' "$MIHOMO_FILE"
   printf '客户端 JSON: %s\n' "$CLIENT_FILE"
-  printf '状态:       systemctl status sudoku sudoku-subscription\n'
+  if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
+    printf '状态:       systemctl status sudoku\n'
+  else
+    printf '状态:       systemctl status sudoku sudoku-subscription\n'
+  fi
   printf '%b══════════════════════════════════%b\n\n' "$CYAN" "$RESET"
 }
 
@@ -834,32 +880,54 @@ install_all() {
   systemctl disable --now "$MSS_SERVICE" >/dev/null 2>&1 || true
   write_mss_service
   write_client_exports
-  write_web_service
+  if [[ $SUBSCRIPTION_MODE == external-qr ]]; then
+    systemctl disable --now "$WEB_SERVICE" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${WEB_SERVICE}"
+  else
+    write_web_service
+  fi
   if [[ $ACME_METHOD == lego ]]; then
     write_lego_renewal_service
   else
     systemctl disable --now "$LEGO_RENEW_TIMER" >/dev/null 2>&1 || true
   fi
   systemctl daemon-reload
-  systemctl enable "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null
+  systemctl enable "$MSS_SERVICE" "$SUDOKU_SERVICE" >/dev/null
+  if [[ $SUBSCRIPTION_MODE != external-qr ]]; then
+    systemctl enable "$WEB_SERVICE" >/dev/null
+  fi
   if [[ $ACME_METHOD == lego ]]; then
     systemctl enable --now "$LEGO_RENEW_TIMER" >/dev/null
   fi
-  systemctl restart "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE"
+  systemctl restart "$MSS_SERVICE" "$SUDOKU_SERVICE"
+  if [[ $SUBSCRIPTION_MODE != external-qr ]]; then
+    systemctl restart "$WEB_SERVICE"
+  fi
   wait_listen "$SUDOKU_PORT" || { journalctl -u "$SUDOKU_SERVICE" -n 30 --no-pager; die "Sudoku 未监听端口"; }
-  wait_listen "$SUBSCRIPTION_PORT" || { journalctl -u "$WEB_SERVICE" -n 30 --no-pager; die "订阅服务未监听端口"; }
-  curl -fsS --max-time 8 --cacert "$TLS_CERT_FILE" \
-    --connect-to "${PUBLIC_IP}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
-    "https://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/healthz" | grep -qx ok || die "HTTPS 订阅服务健康检查失败"
+  if [[ $SUBSCRIPTION_MODE != external-qr ]]; then
+    wait_listen "$SUBSCRIPTION_PORT" || { journalctl -u "$WEB_SERVICE" -n 30 --no-pager; die "订阅服务未监听端口"; }
+    curl -fsS --max-time 8 --cacert "$TLS_CERT_FILE" \
+      --connect-to "${PUBLIC_IP}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
+      "https://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/healthz" | grep -qx ok || die "HTTPS 订阅服务健康检查失败"
+  fi
   open_firewall_port "$SUDOKU_PORT"
-  open_firewall_port "$SUBSCRIPTION_PORT"
+  if [[ $SUBSCRIPTION_MODE != external-qr ]]; then
+    open_firewall_port "$SUBSCRIPTION_PORT"
+  fi
   if [[ -n $previous_sudoku_port && $previous_sudoku_port != "$SUDOKU_PORT" ]]; then
     close_firewall_port "$previous_sudoku_port"
   fi
   if [[ -n $previous_subscription_port && $previous_subscription_port != "$SUBSCRIPTION_PORT" ]]; then
     close_firewall_port "$previous_subscription_port"
   fi
-  ok "Sudoku 与订阅服务均已启动"
+  if [[ $SUBSCRIPTION_MODE == external-qr && -n $previous_subscription_port ]]; then
+    close_firewall_port "$previous_subscription_port"
+  fi
+  if [[ $SUBSCRIPTION_MODE == external-qr ]]; then
+    ok "Sudoku 已启动；80/443 均被占用，已生成外部 HTTPS 二维码链接"
+  else
+    ok "Sudoku 与订阅服务均已启动"
+  fi
   show_result
 }
 
@@ -877,16 +945,30 @@ update_binary() {
 
 show_status() {
   require_root
-  systemctl --no-pager --full status "$SUDOKU_SERVICE" "$WEB_SERVICE" || true
+  load_state || die "安装状态文件缺失"
+  if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
+    systemctl --no-pager --full status "$SUDOKU_SERVICE" || true
+  else
+    systemctl --no-pager --full status "$SUDOKU_SERVICE" "$WEB_SERVICE" || true
+  fi
   show_result
 }
 
 service_action() {
   require_root
   local action=$1
-  systemctl "$action" "$SUDOKU_SERVICE" "$WEB_SERVICE"
+  load_state || die "安装状态文件缺失"
+  if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
+    systemctl "$action" "$SUDOKU_SERVICE"
+  else
+    systemctl "$action" "$SUDOKU_SERVICE" "$WEB_SERVICE"
+  fi
   ok "服务已执行：$action"
-  systemctl is-active "$SUDOKU_SERVICE" "$WEB_SERVICE" || true
+  if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
+    systemctl is-active "$SUDOKU_SERVICE" || true
+  else
+    systemctl is-active "$SUDOKU_SERVICE" "$WEB_SERVICE" || true
+  fi
 }
 
 show_logs() {

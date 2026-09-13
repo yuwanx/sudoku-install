@@ -2,7 +2,7 @@
 
 # Sudoku 一键安装与 Mihomo 扫码订阅
 
-**自动部署 Sudoku 服务端 · 受信任的公网 IP HTTPS 证书 · Mihomo YAML 订阅与二维码**
+**自动部署 Sudoku 服务端 · 公网 IP HTTPS 订阅 · 端口冲突时自动切换外部 HTTPS 二维码**
 
 [![Sudoku](https://img.shields.io/badge/Sudoku-v0.5.0-6c63ff?style=flat-square)](https://github.com/SUDOKU-ASCII/sudoku)
 [![Mihomo](https://img.shields.io/badge/Mihomo-%3E%20v1.19.21-00b4d8?style=flat-square)](https://github.com/MetaCubeX/mihomo)
@@ -31,6 +31,7 @@
 - **自动续期**：启用 Certbot 定时器，续期后自动重载订阅服务。
 - **兼容新装 snapd**：主动识别 `/snap/bin/certbot`，当前终端无需重新登录或刷新 PATH。
 - **双 ACME 验证路径**：80 端口不可用时自动改走 443/tcp 的 TLS-ALPN-01，无需停掉 80 上的网站。
+- **80/443 冲突兜底**：检测到两个标准端口均已占用时，不改动现有 Web 服务，自动生成 `api.qrserver.com` HTTPS 二维码链接，二维码内容为 `sudoku://` 原生短链。
 - **扫码与订阅导入**：输出 Mihomo YAML、订阅 URL、网页二维码和一键导入链接。
 - **配置预检**：启动前调用 Sudoku 自带的 `-test` 校验服务端与客户端配置。
 - **服务托管**：创建 `sudoku.service`、`sudoku-subscription.service` 和 `sudoku-mss.service`。
@@ -45,7 +46,7 @@
 - `root` 权限；
 - `amd64` 或 `arm64`；
 - 公网 IPv4；
-- 外部能够访问 `80/tcp`，用于证书首次签发和自动续期；
+- 如需本机 HTTPS 订阅页，外部需能访问 `80/tcp` 或 `443/tcp` 完成证书验证；两者均被占用时自动使用外部二维码模式；
 - Mihomo 内核版本高于 `v1.19.21`。
 
 当前已在 **Ubuntu 24.04 / amd64 / Mihomo v1.19.30** 上完成安装与真实 HTTPS 代理链路验证。
@@ -84,7 +85,7 @@ SUDOKU_PORT=443 SUBSCRIPTION_PORT=18080 SERVER_IP=203.0.113.10 \
 
 ## 导入 Mihomo
 
-安装成功后终端会显示：
+本机 HTTPS 订阅模式安装成功后终端会显示：
 
 ```text
 扫码页面:   https://SERVER_IP:SUBSCRIPTION_PORT/RANDOM_TOKEN/
@@ -99,7 +100,17 @@ Mihomo YAML: /etc/sudoku/mihomo.yaml
 3. 或直接复制订阅链接到订阅管理页面；
 4. 更新订阅后选择生成的 `sudoku-PORT` 节点。
 
-二维码由服务器本机的 `qrencode` 生成，节点信息不会提交给第三方二维码网站。订阅 URL 含客户端连接密钥，应按密码级别保存。
+正常模式下二维码由服务器本机的 `qrencode` 生成，节点信息不会提交给第三方二维码网站。订阅 URL 含客户端连接密钥，应按密码级别保存。
+
+如果脚本检测到 `80/tcp` 和 `443/tcp` 同时被占用，则输出：
+
+```text
+导入方式:   外部 HTTPS 二维码（二维码内容为 sudoku:// 原生短链）
+二维码图片: https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=...
+Mihomo YAML: /etc/sudoku/mihomo.yaml
+```
+
+此模式不启动 `sudoku-subscription.service`，不会抢占现有 Web 端口；打开二维码图片地址后，用支持 Sudoku 的 Mihomo 客户端扫码导入。节点短链会作为 HTTPS 查询参数提交给二维码服务，本地完整配置仍保存在 `/etc/sudoku/mihomo.yaml`。
 
 ## 管理命令
 
@@ -134,6 +145,7 @@ bash <(fetch_sudoku_installer) uninstall   # 卸载，保留历史备份
 | `/etc/sudoku/server.config.json` | 服务端配置 |
 | `/etc/sudoku/client.config.json` | 原生客户端配置 |
 | `/etc/sudoku/mihomo.yaml` | Mihomo 完整配置 |
+| `/etc/sudoku/external-qr.url` | 80/443 均占用时生成的外部二维码图片地址 |
 | `/etc/sudoku/subscription/` | 令牌化网页、YAML 与二维码 |
 | `/etc/letsencrypt/live/IP/` | 公网 IP 证书与私钥 |
 | `/var/backups/sudoku-install/` | 重装前备份 |
@@ -178,7 +190,13 @@ curl -I "https://SERVER_IP:SUBSCRIPTION_PORT/RANDOM_TOKEN/config.yaml"
 journalctl -u sudoku -u sudoku-subscription -n 100 --no-pager
 ```
 
-如果 80 端口已由 Nginx、Apache 或 OpenResty 使用，脚本会依次探测常见 Webroot；探测失败但 443 端口空闲时，会自动使用 Lego 的 TLS-ALPN-01 验证申请同样受信任的 IP 证书。两条路径都不需要关闭 80 上的网站。
+端口与签发策略如下：
+
+1. `80/tcp` 空闲：Certbot HTTP-01；
+2. `80/tcp` 已占用、`443/tcp` 空闲：先尝试现有站点 Webroot，失败后使用 Lego TLS-ALPN-01；
+3. `80/tcp` 与 `443/tcp` 均已占用：保留现有 Web 服务，切换到 `api.qrserver.com` 外部 HTTPS 二维码模式。
+
+前两种路径生成受信任的公网 IP HTTPS 订阅页；第三种路径直接把 `sudoku://` 原生短链编码为二维码，不再部署本机订阅页。
 
 ```bash
 SUDOKU_CERTBOT_WEBROOT=/var/www/html bash <(fetch_sudoku_installer) install
