@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly ETC_DIR="/etc/sudoku"
@@ -397,7 +397,34 @@ install_current_certbot() {
   certbot_is_current || die "Certbot 版本低于 5.4"
 }
 
+discover_certbot_webroot() {
+  local requested=${SUDOKU_CERTBOT_WEBROOT:-} root probe token body
+  local candidates=()
+  if [[ -n $requested ]]; then
+    [[ $requested == /* ]] || die "SUDOKU_CERTBOT_WEBROOT 必须是绝对路径"
+    candidates+=("$requested")
+  else
+    candidates+=(/var/www/html /usr/share/nginx/html /var/www/default/html)
+  fi
+  probe="sudoku-$(generate_token)"
+  token=$(generate_token)
+  for root in "${candidates[@]}"; do
+    [[ -d $root ]] || continue
+    mkdir -p "${root}/.well-known/acme-challenge"
+    printf '%s' "$token" > "${root}/.well-known/acme-challenge/${probe}"
+    body=$(curl -kfsSL --connect-timeout 4 --max-time 8 \
+      "http://${PUBLIC_IP}/.well-known/acme-challenge/${probe}" 2>/dev/null || true)
+    rm -f "${root}/.well-known/acme-challenge/${probe}"
+    if [[ $body == "$token" ]]; then
+      printf '%s\n' "$root"
+      return 0
+    fi
+  done
+  return 1
+}
+
 setup_tls() {
+  local webroot=""
   SUBSCRIPTION_SCHEME=https
   if [[ $DEFAULT_TLS_MODE == self-signed ]]; then
     local cert_dir="${ETC_DIR}/tls"
@@ -418,10 +445,17 @@ setup_tls() {
   TLS_KEY_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/privkey.pem"
   open_firewall_port 80
   if [[ ! -s $TLS_CERT_FILE || ! -s $TLS_KEY_FILE ]] || ! openssl x509 -checkend 43200 -noout -in "$TLS_CERT_FILE"; then
-    port_in_use 80 && die "申请 IP 证书需要空闲的 80/tcp 端口"
-    info "向 Let's Encrypt 申请受信任的公网 IP 短期证书"
-    "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
-      --preferred-profile shortlived --standalone --ip-address "$PUBLIC_IP"
+    if port_in_use 80; then
+      webroot=$(discover_certbot_webroot || true)
+      [[ -n $webroot ]] || die "80/tcp 已占用且未找到可用 Webroot；请设置 SUDOKU_CERTBOT_WEBROOT=站点根目录 后重试"
+      info "复用现有 Web 服务进行证书验证，Webroot：${webroot}"
+      "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
+        --preferred-profile shortlived --webroot --webroot-path "$webroot" --ip-address "$PUBLIC_IP"
+    else
+      info "向 Let's Encrypt 申请受信任的公网 IP 短期证书"
+      "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
+        --preferred-profile shortlived --standalone --ip-address "$PUBLIC_IP"
+    fi
   fi
   [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] || die "证书文件生成失败"
   mkdir -p "$(dirname "$CERTBOT_HOOK")"

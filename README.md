@@ -76,6 +76,7 @@ SUDOKU_PORT=443 SUBSCRIPTION_PORT=18080 SERVER_IP=203.0.113.10 \
 | `SUDOKU_FALLBACK` | `127.0.0.1:80` | 可疑连接的回落地址 |
 | `SUDOKU_TCP_MSS` | `1200` | Sudoku 端口 MSS；设为 `0` 可关闭 |
 | `SUDOKU_TLS_MODE` | `letsencrypt` | 可选 `letsencrypt` / `self-signed` |
+| `SUDOKU_CERTBOT_WEBROOT` | 自动探测 | 80 端口已有 Web 服务时的站点根目录 |
 | `SUDOKU_FORCE_DOWNLOAD` | `0` | 设为 `1` 强制重新下载当前版本 |
 
 > 自签模式也会使用 HTTPS，但扫码设备需先信任该证书；默认的 Let's Encrypt IP 证书可被主流系统直接验证。
@@ -176,7 +177,13 @@ curl -I "https://SERVER_IP:SUBSCRIPTION_PORT/RANDOM_TOKEN/config.yaml"
 journalctl -u sudoku -u sudoku-subscription -n 100 --no-pager
 ```
 
-如果证书签发失败，优先检查云安全组、UFW/firewalld 是否允许 `80/tcp`，以及端口 80 是否被其他程序占用。
+如果 80 端口已由 Nginx、Apache 或 OpenResty 使用，脚本会依次探测常见 Webroot，并改用不中断现有站点的 Webroot 验证。无法自动识别时可指定实际站点根目录：
+
+```bash
+SUDOKU_CERTBOT_WEBROOT=/var/www/html bash <(fetch_sudoku_installer) install
+```
+
+可先用 `ss -lntp 'sport = :80'` 确认监听程序，并检查其站点配置中的 `root`/`DocumentRoot`。同时确保云安全组允许 `80/tcp`。
 
 ## 上游与许可
 
