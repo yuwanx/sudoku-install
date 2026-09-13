@@ -93,7 +93,7 @@ wait_for_apt() {
       done
     fi
     if pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 \
-      || pgrep -x dpkg >/dev/null 2>&1 || pgrep -x unattended-upgr >/dev/null 2>&1; then
+      || pgrep -x dpkg >/dev/null 2>&1; then
       busy=true
     fi
     [[ $busy == false ]] && return 0
