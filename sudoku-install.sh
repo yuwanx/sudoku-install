@@ -65,6 +65,7 @@ install_dependencies() {
   ((${#missing[@]} == 0)) && return 0
   info "安装依赖：${missing[*]}"
   if command -v apt-get >/dev/null 2>&1; then
+    wait_for_apt
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
   elif command -v dnf >/dev/null 2>&1; then
@@ -76,6 +77,25 @@ install_dependencies() {
   else
     die "未识别包管理器，请先安装：${packages[*]}"
   fi
+}
+
+wait_for_apt() {
+  local waited=0 lock busy
+  while ((waited < 300)); do
+    busy=false
+    if command -v fuser >/dev/null 2>&1; then
+      for lock in /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock; do
+        if fuser "$lock" >/dev/null 2>&1; then busy=true; break; fi
+      done
+    elif pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1; then
+      busy=true
+    fi
+    [[ $busy == false ]] && return 0
+    ((waited == 0)) && warn "APT/DPKG 正在被其他任务使用，最多等待 5 分钟"
+    sleep 3
+    ((waited += 3))
+  done
+  die "等待 APT/DPKG 锁超时"
 }
 
 is_valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535)); }
