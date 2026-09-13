@@ -368,7 +368,20 @@ PY
 
 install_current_certbot() {
   certbot_is_current && return 0
-  command -v snap >/dev/null 2>&1 || die "自动申请 IP 证书需要 Certbot 5.4+ 与 snapd"
+  if ! command -v snap >/dev/null 2>&1; then
+    info "安装 snapd"
+    if command -v apt-get >/dev/null 2>&1; then
+      wait_for_apt
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq snapd
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y snapd
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y snapd
+    else
+      die "自动申请 IP 证书需要 Certbot 5.4+ 与 snapd"
+    fi
+    systemctl enable --now snapd.socket
+  fi
   info "安装支持 IP 证书的新版 Certbot"
   snap install certbot --classic || snap refresh certbot
   certbot_is_current || die "Certbot 版本低于 5.4"
@@ -720,6 +733,24 @@ show_status() {
   show_result
 }
 
+service_action() {
+  require_root
+  local action=$1
+  systemctl "$action" "$SUDOKU_SERVICE" "$WEB_SERVICE"
+  ok "服务已执行：$action"
+  systemctl is-active "$SUDOKU_SERVICE" "$WEB_SERVICE" || true
+}
+
+show_logs() {
+  require_root
+  shift || true
+  if (($#)); then
+    journalctl -u "$SUDOKU_SERVICE" -u "$WEB_SERVICE" "$@" --no-pager
+  else
+    journalctl -u "$SUDOKU_SERVICE" -u "$WEB_SERVICE" -n 100 --no-pager
+  fi
+}
+
 uninstall_all() {
   require_root
   load_state || true
@@ -752,7 +783,10 @@ case "${1:-menu}" in
   install) install_all ;;
   update) update_binary ;;
   show|status) show_status ;;
+  start|stop|restart) service_action "$1" ;;
+  log|logs) show_logs "$@" ;;
+  qr) show_result ;;
   uninstall) uninstall_all ;;
   menu) menu ;;
-  *) die "用法：$0 [install|update|show|uninstall|menu]" ;;
+  *) die "用法：$0 [install|update|show|start|stop|restart|log|qr|uninstall|menu]" ;;
 esac
