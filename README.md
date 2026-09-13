@@ -6,7 +6,8 @@
 
 ```bash
 bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
-  https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) install
+  -H 'Accept: application/vnd.github.raw+json' \
+  'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main') install
 ```
 
 指定端口：
@@ -14,7 +15,8 @@ bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 ```bash
 SUDOKU_PORT=34567 SUBSCRIPTION_PORT=18080 \
   bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
-    https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) install
+    -H 'Accept: application/vnd.github.raw+json' \
+    'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main') install
 ```
 
 安装完成后终端会输出：
