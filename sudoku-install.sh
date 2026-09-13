@@ -84,14 +84,9 @@ install_dependencies() {
 }
 
 wait_for_apt() {
-  local waited=0 lock busy
+  local waited=0 busy
   while ((waited < 300)); do
     busy=false
-    if command -v fuser >/dev/null 2>&1; then
-      for lock in /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock; do
-        if fuser "$lock" >/dev/null 2>&1; then busy=true; break; fi
-      done
-    fi
     if pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 \
       || pgrep -x dpkg >/dev/null 2>&1; then
       busy=true
