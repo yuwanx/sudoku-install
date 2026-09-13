@@ -19,6 +19,8 @@ SUDOKU_PORT=34567 SUBSCRIPTION_PORT=18080 \
     'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main') install
 ```
 
+如果所在网络确认不需要 TCP MSS 兼容规则，可在安装命令前设置 `SUDOKU_TCP_MSS=0`；默认值 `1200` 用于避免部分跨网链路在较大握手报文上出现 PMTU 黑洞。
+
 安装完成后终端会输出：
 
 - 扫码页面：浏览器打开后可扫描 Mihomo 订阅二维码；
@@ -31,17 +33,19 @@ SUDOKU_PORT=34567 SUBSCRIPTION_PORT=18080 \
 ## 管理
 
 ```bash
+fetch_sudoku_installer() {
+  curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+    -H 'Accept: application/vnd.github.raw+json' \
+    'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main'
+}
+
 # 菜单
-bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh)
+bash <(fetch_sudoku_installer)
 
-# 更新 Sudoku 二进制并保留配置
-bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) update
-
-# 查看服务状态、扫码页面和订阅链接
-bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) show
-
-# 卸载
-bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) uninstall
+# 更新 / 查看 / 卸载
+bash <(fetch_sudoku_installer) update
+bash <(fetch_sudoku_installer) show
+bash <(fetch_sudoku_installer) uninstall
 ```
 
 ## 文件与服务
@@ -50,6 +54,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/s
 - `/etc/sudoku/server.config.json`
 - `/etc/sudoku/mihomo.yaml`
 - `sudoku.service`
+- `sudoku-mss.service`
 - `sudoku-subscription.service`
 - 重装前备份：`/var/backups/sudoku-install/`
 
@@ -60,6 +65,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/s
 - 启动前使用 Sudoku 自带 `-test` 校验服务端与客户端配置；
 - 订阅 Web 服务只响应随机令牌路径，不开放目录列表；
 - systemd 服务自动重启并启用基础沙箱限制；
+- 默认持久化仅作用于 Sudoku 端口的 TCP MSS=1200 规则，规避 PMTU 黑洞导致的 TLS 握手中断；
 - 不会主动关闭 UFW/firewalld，只放行本次使用的 TCP 端口。
 
 > 订阅 URL 中包含客户端密钥，请像保管密码一样保管该链接。默认是 HTTP；如需公网 TLS，可在现有反向代理中为扫码页面和 YAML 订阅配置 HTTPS。

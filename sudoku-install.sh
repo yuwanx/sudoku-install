@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly ETC_DIR="/etc/sudoku"
@@ -21,11 +21,14 @@ readonly WEB_APP_DIR="/usr/local/lib/sudoku-subscription"
 readonly WEB_APP="${WEB_APP_DIR}/server.py"
 readonly SUDOKU_SERVICE="sudoku.service"
 readonly WEB_SERVICE="sudoku-subscription.service"
+readonly MSS_SERVICE="sudoku-mss.service"
+readonly MSS_SCRIPT="/usr/local/lib/sudoku-mss"
 readonly BACKUP_ROOT="/var/backups/sudoku-install"
 readonly DEFAULT_FALLBACK="${SUDOKU_FALLBACK:-127.0.0.1:80}"
 readonly DEFAULT_AEAD="chacha20-poly1305"
 readonly DEFAULT_ASCII="prefer_entropy"
 readonly DEFAULT_CLIENT_PORT="1080"
+readonly DEFAULT_TCP_MSS="${SUDOKU_TCP_MSS:-1200}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RESET='\033[0m'
 info() { printf '%b[*]%b %s\n' "$CYAN" "$RESET" "$*"; }
@@ -54,13 +57,14 @@ detect_arch() {
 }
 
 install_dependencies() {
-  local packages=(curl ca-certificates tar python3 qrencode iproute2)
+  local packages=(curl ca-certificates tar python3 qrencode iproute2 iptables)
   local missing=()
   command -v curl >/dev/null 2>&1 || missing+=(curl)
   command -v tar >/dev/null 2>&1 || missing+=(tar)
   command -v python3 >/dev/null 2>&1 || missing+=(python3)
   command -v qrencode >/dev/null 2>&1 || missing+=(qrencode)
   command -v ss >/dev/null 2>&1 || missing+=(iproute2)
+  command -v iptables >/dev/null 2>&1 || missing+=(iptables)
   [[ -r /etc/ssl/certs/ca-certificates.crt || -r /etc/pki/tls/certs/ca-bundle.crt ]] || missing+=(ca-certificates)
   ((${#missing[@]} == 0)) && return 0
   info "安装依赖：${missing[*]}"
@@ -100,6 +104,7 @@ wait_for_apt() {
 }
 
 is_valid_port() { [[ ${1:-} =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535)); }
+is_valid_mss() { [[ ${1:-} =~ ^[0-9]+$ ]] && ((10#$1 == 0 || (536 <= 10#$1 && 10#$1 <= 1460))); }
 port_in_use() { ss -H -lnt "sport = :$1" 2>/dev/null | grep -q .; }
 
 random_port() {
@@ -235,6 +240,7 @@ SUBSCRIPTION_PORT=${SUBSCRIPTION_PORT}
 SUBSCRIPTION_TOKEN=${SUBSCRIPTION_TOKEN}
 PUBLIC_IP=${PUBLIC_IP}
 HTTPMASK_PATH_ROOT=${HTTPMASK_PATH_ROOT}
+TCP_MSS=${TCP_MSS}
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -287,6 +293,50 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=${ETC_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+write_mss_service() {
+  mkdir -p "$(dirname "$MSS_SCRIPT")"
+  cat > "$MSS_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+action=${1:?apply or remove}
+port=${2:?port}
+mss=${3:?mss}
+((mss == 0)) && exit 0
+rules=(
+  "PREROUTING -p tcp --dport ${port} --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${mss}"
+  "OUTPUT -p tcp --sport ${port} --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${mss}"
+)
+for rule in "${rules[@]}"; do
+  read -r chain rest <<<"$rule"
+  # shellcheck disable=SC2086
+  if [[ $action == apply ]]; then
+    iptables -w 5 -t mangle -C "$chain" $rest 2>/dev/null || iptables -w 5 -t mangle -I "$chain" 1 $rest
+  else
+    while iptables -w 5 -t mangle -C "$chain" $rest 2>/dev/null; do
+      # shellcheck disable=SC2086
+      iptables -w 5 -t mangle -D "$chain" $rest
+    done
+  fi
+done
+EOF
+  chmod 755 "$MSS_SCRIPT"
+  cat > "/etc/systemd/system/${MSS_SERVICE}" <<EOF
+[Unit]
+Description=Sudoku TCP MSS clamp
+Before=${SUDOKU_SERVICE}
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${MSS_SCRIPT} apply ${SUDOKU_PORT} ${TCP_MSS}
+ExecStop=${MSS_SCRIPT} remove ${SUDOKU_PORT} ${TCP_MSS}
 
 [Install]
 WantedBy=multi-user.target
@@ -484,6 +534,17 @@ open_firewall_port() {
   fi
 }
 
+close_firewall_port() {
+  local port=${1:-}
+  is_valid_port "$port" || return 0
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+  elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
 backup_existing() {
   [[ -e $ETC_DIR || -e $BIN || -e /etc/systemd/system/$SUDOKU_SERVICE ]] || return 0
   local dest="${BACKUP_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)"
@@ -492,6 +553,7 @@ backup_existing() {
   [[ -e $BIN ]] && cp -a "$BIN" "$dest/sudoku.bin"
   [[ -e /etc/systemd/system/$SUDOKU_SERVICE ]] && cp -a "/etc/systemd/system/$SUDOKU_SERVICE" "$dest/"
   [[ -e /etc/systemd/system/$WEB_SERVICE ]] && cp -a "/etc/systemd/system/$WEB_SERVICE" "$dest/"
+  [[ -e /etc/systemd/system/$MSS_SERVICE ]] && cp -a "/etc/systemd/system/$MSS_SERVICE" "$dest/"
   ok "现有安装已备份：$dest"
 }
 
@@ -524,12 +586,15 @@ install_all() {
     previous_sudoku_port=$(sed -n 's/^SUDOKU_PORT=//p' "$STATE_FILE" | head -n1)
     previous_subscription_port=$(sed -n 's/^SUBSCRIPTION_PORT=//p' "$STATE_FILE" | head -n1)
   fi
+  systemctl disable --now "$MSS_SERVICE" >/dev/null 2>&1 || true
   SUDOKU_PORT=$(choose_port "${SUDOKU_PORT:-}" 20000 50000 "Sudoku" "$previous_sudoku_port")
   SUBSCRIPTION_PORT=$(choose_port "${SUBSCRIPTION_PORT:-}" 10000 19999 "订阅" "$previous_subscription_port")
   [[ $SUDOKU_PORT != "$SUBSCRIPTION_PORT" ]] || die "两个端口不可相同"
   PUBLIC_IP=$(get_public_ip)
   SUBSCRIPTION_TOKEN=$(generate_token)
   HTTPMASK_PATH_ROOT=""
+  TCP_MSS="$DEFAULT_TCP_MSS"
+  is_valid_mss "$TCP_MSS" || die "SUDOKU_TCP_MSS 应为 0 或 536-1460"
   mkdir -p "$ETC_DIR" "$WEB_ROOT"
   download_binary
   generate_keys
@@ -538,16 +603,23 @@ install_all() {
   write_state
   write_server_config
   write_sudoku_service
+  write_mss_service
   write_client_exports
   write_web_service
   systemctl daemon-reload
-  systemctl enable "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null
-  systemctl restart "$SUDOKU_SERVICE" "$WEB_SERVICE"
+  systemctl enable "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null
+  systemctl restart "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE"
   wait_listen "$SUDOKU_PORT" || { journalctl -u "$SUDOKU_SERVICE" -n 30 --no-pager; die "Sudoku 未监听端口"; }
   wait_listen "$SUBSCRIPTION_PORT" || { journalctl -u "$WEB_SERVICE" -n 30 --no-pager; die "订阅服务未监听端口"; }
   curl -fsS --max-time 5 "http://127.0.0.1:${SUBSCRIPTION_PORT}/healthz" | grep -qx ok || die "订阅服务健康检查失败"
   open_firewall_port "$SUDOKU_PORT"
   open_firewall_port "$SUBSCRIPTION_PORT"
+  if [[ -n $previous_sudoku_port && $previous_sudoku_port != "$SUDOKU_PORT" ]]; then
+    close_firewall_port "$previous_sudoku_port"
+  fi
+  if [[ -n $previous_subscription_port && $previous_subscription_port != "$SUBSCRIPTION_PORT" ]]; then
+    close_firewall_port "$previous_subscription_port"
+  fi
   ok "Sudoku 与订阅服务均已启动"
   show_result
 }
@@ -573,8 +645,8 @@ show_status() {
 uninstall_all() {
   require_root
   load_state || true
-  systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "$BIN"
+  systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" "$MSS_SERVICE" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "$MSS_SCRIPT" "$BIN"
   rm -rf "$ETC_DIR" "$WEB_APP_DIR"
   systemctl daemon-reload
   if [[ -n ${SUDOKU_PORT:-} ]] && command -v ufw >/dev/null 2>&1; then ufw delete allow "${SUDOKU_PORT}/tcp" >/dev/null 2>&1 || true; fi
