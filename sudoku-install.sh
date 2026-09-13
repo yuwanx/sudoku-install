@@ -66,8 +66,12 @@ install_dependencies() {
   info "安装依赖：${missing[*]}"
   if command -v apt-get >/dev/null 2>&1; then
     wait_for_apt
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+    if ! timeout 180 apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 \
+      -o Acquire::https::Timeout=20 update -qq; then
+      warn "APT 索引更新超时，尝试使用现有软件包索引继续安装"
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 \
+      -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y -qq "${missing[@]}"
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y "${missing[@]}"
   elif command -v yum >/dev/null 2>&1; then
