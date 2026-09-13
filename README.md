@@ -1,6 +1,6 @@
 # Sudoku 一键安装 + Mihomo 扫码订阅
 
-面向 Linux `amd64` / `arm64` 的 Sudoku 服务端安装脚本。安装完成后会提供一个带随机令牌的网页，页面包含 Mihomo YAML 订阅二维码，可用采用 Mihomo 内核的客户端扫码或粘贴订阅链接导入。
+面向 Linux `amd64` / `arm64` 的 Sudoku 服务端安装脚本。安装完成后会自动为公网 IP 申请受信任的 HTTPS 证书，并提供带随机令牌的 Mihomo YAML 订阅二维码。
 
 ## 一键安装
 
@@ -20,6 +20,8 @@ SUDOKU_PORT=34567 SUBSCRIPTION_PORT=18080 \
 ```
 
 如果所在网络确认不需要 TCP MSS 兼容规则，可在安装命令前设置 `SUDOKU_TCP_MSS=0`；默认值 `1200` 用于避免部分跨网链路在较大握手报文上出现 PMTU 黑洞。
+
+默认使用 Certbot 5.4+ 申请 Let's Encrypt 公网 IP 短期证书并自动续期，签发时要求外部可访问服务器 `80/tcp`。如明确需要自签模式，可设置 `SUDOKU_TLS_MODE=self-signed`，但导入设备需要事先信任该证书。
 
 安装完成后终端会输出：
 
@@ -61,6 +63,7 @@ bash <(fetch_sudoku_installer) uninstall
 ## 设计说明
 
 - 下载 GitHub 最新 Release，并核对 GitHub Release API 给出的 SHA-256；
+- 自动申请受系统信任的公网 IP HTTPS 证书，Certbot 自动续期并重载订阅服务；
 - 默认使用直接 Sudoku TCP 传输，服务端与 Mihomo 导出的 HTTPMask、下行模式保持一致；
 - 启动前使用 Sudoku 自带 `-test` 校验服务端与客户端配置；
 - 订阅 Web 服务只响应随机令牌路径，不开放目录列表；
@@ -68,6 +71,6 @@ bash <(fetch_sudoku_installer) uninstall
 - 默认持久化仅作用于 Sudoku 端口的 TCP MSS=1200 规则，规避 PMTU 黑洞导致的 TLS 握手中断；
 - 不会主动关闭 UFW/firewalld，只放行本次使用的 TCP 端口。
 
-> 订阅 URL 中包含客户端密钥，请像保管密码一样保管该链接。默认是 HTTP；如需公网 TLS，可在现有反向代理中为扫码页面和 YAML 订阅配置 HTTPS。
+> 订阅 URL 中包含客户端密钥，请像保管密码一样保管该链接。
 
 上游项目：[SUDOKU-ASCII/sudoku](https://github.com/SUDOKU-ASCII/sudoku)

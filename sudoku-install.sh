@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly ETC_DIR="/etc/sudoku"
@@ -23,12 +23,14 @@ readonly SUDOKU_SERVICE="sudoku.service"
 readonly WEB_SERVICE="sudoku-subscription.service"
 readonly MSS_SERVICE="sudoku-mss.service"
 readonly MSS_SCRIPT="/usr/local/lib/sudoku-mss"
+readonly CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/sudoku-subscription"
 readonly BACKUP_ROOT="/var/backups/sudoku-install"
 readonly DEFAULT_FALLBACK="${SUDOKU_FALLBACK:-127.0.0.1:80}"
 readonly DEFAULT_AEAD="chacha20-poly1305"
 readonly DEFAULT_ASCII="prefer_entropy"
 readonly DEFAULT_CLIENT_PORT="1080"
 readonly DEFAULT_TCP_MSS="${SUDOKU_TCP_MSS:-1200}"
+readonly DEFAULT_TLS_MODE="${SUDOKU_TLS_MODE:-letsencrypt}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RESET='\033[0m'
 info() { printf '%b[*]%b %s\n' "$CYAN" "$RESET" "$*"; }
@@ -57,7 +59,7 @@ detect_arch() {
 }
 
 install_dependencies() {
-  local packages=(curl ca-certificates tar python3 qrencode iproute2 iptables)
+  local packages=(curl ca-certificates tar python3 qrencode iproute2 iptables openssl)
   local missing=()
   command -v curl >/dev/null 2>&1 || missing+=(curl)
   command -v tar >/dev/null 2>&1 || missing+=(tar)
@@ -65,6 +67,7 @@ install_dependencies() {
   command -v qrencode >/dev/null 2>&1 || missing+=(qrencode)
   command -v ss >/dev/null 2>&1 || missing+=(iproute2)
   command -v iptables >/dev/null 2>&1 || missing+=(iptables)
+  command -v openssl >/dev/null 2>&1 || missing+=(openssl)
   [[ -r /etc/ssl/certs/ca-certificates.crt || -r /etc/pki/tls/certs/ca-bundle.crt ]] || missing+=(ca-certificates)
   ((${#missing[@]} == 0)) && return 0
   info "安装依赖：${missing[*]}"
@@ -247,6 +250,9 @@ SUBSCRIPTION_TOKEN=${SUBSCRIPTION_TOKEN}
 PUBLIC_IP=${PUBLIC_IP}
 HTTPMASK_PATH_ROOT=${HTTPMASK_PATH_ROOT}
 TCP_MSS=${TCP_MSS}
+SUBSCRIPTION_SCHEME=${SUBSCRIPTION_SCHEME}
+TLS_CERT_FILE=${TLS_CERT_FILE}
+TLS_KEY_FILE=${TLS_KEY_FILE}
 EOF
   chmod 600 "$STATE_FILE"
 }
@@ -349,10 +355,65 @@ WantedBy=multi-user.target
 EOF
 }
 
+certbot_is_current() {
+  command -v certbot >/dev/null 2>&1 || return 1
+  local version
+  version=$(certbot --version 2>&1 | sed -n 's/^certbot \([0-9][0-9.]*\).*/\1/p')
+  [[ -n $version ]] && python3 - "$version" <<'PY'
+import sys
+parts = tuple(int(x) for x in sys.argv[1].split('.')[:2])
+raise SystemExit(0 if parts >= (5, 4) else 1)
+PY
+}
+
+install_current_certbot() {
+  certbot_is_current && return 0
+  command -v snap >/dev/null 2>&1 || die "自动申请 IP 证书需要 Certbot 5.4+ 与 snapd"
+  info "安装支持 IP 证书的新版 Certbot"
+  snap install certbot --classic || snap refresh certbot
+  certbot_is_current || die "Certbot 版本低于 5.4"
+}
+
+setup_tls() {
+  SUBSCRIPTION_SCHEME=https
+  if [[ $DEFAULT_TLS_MODE == self-signed ]]; then
+    local cert_dir="${ETC_DIR}/tls"
+    mkdir -p "$cert_dir"
+    TLS_CERT_FILE="${cert_dir}/fullchain.pem"
+    TLS_KEY_FILE="${cert_dir}/privkey.pem"
+    openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
+      -subj "/CN=${PUBLIC_IP}" -addext "subjectAltName=IP:${PUBLIC_IP}" \
+      -keyout "$TLS_KEY_FILE" -out "$TLS_CERT_FILE" >/dev/null 2>&1
+    chmod 600 "$TLS_CERT_FILE" "$TLS_KEY_FILE"
+    warn "已生成自签证书；客户端需先信任该证书"
+    return 0
+  fi
+  [[ $DEFAULT_TLS_MODE == letsencrypt ]] || die "SUDOKU_TLS_MODE 仅支持 letsencrypt/self-signed"
+  [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IP 证书模式当前需要 IPv4 地址"
+  install_current_certbot
+  TLS_CERT_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/fullchain.pem"
+  TLS_KEY_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/privkey.pem"
+  open_firewall_port 80
+  if [[ ! -s $TLS_CERT_FILE || ! -s $TLS_KEY_FILE ]] || ! openssl x509 -checkend 43200 -noout -in "$TLS_CERT_FILE"; then
+    port_in_use 80 && die "申请 IP 证书需要空闲的 80/tcp 端口"
+    info "向 Let's Encrypt 申请受信任的公网 IP 短期证书"
+    certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
+      --preferred-profile shortlived --standalone --ip-address "$PUBLIC_IP"
+  fi
+  [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] || die "证书文件生成失败"
+  mkdir -p "$(dirname "$CERTBOT_HOOK")"
+  cat > "$CERTBOT_HOOK" <<EOF
+#!/usr/bin/env bash
+systemctl try-restart ${WEB_SERVICE}
+EOF
+  chmod 755 "$CERTBOT_HOOK"
+  ok "公网 IP HTTPS 证书有效期至：$(openssl x509 -enddate -noout -in "$TLS_CERT_FILE" | cut -d= -f2-)"
+}
+
 write_client_exports() {
   local server_address subscription_url clash_url
   server_address="${PUBLIC_IP}:${SUDOKU_PORT}"
-  subscription_url="http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
+  subscription_url="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
 
   cat > "$CLIENT_FILE" <<EOF
 {
@@ -451,13 +512,15 @@ write_web_service() {
   mkdir -p "$WEB_APP_DIR"
   cat > "$WEB_APP" <<'PY'
 #!/usr/bin/env python3
-import http.server, os
+import http.server, os, ssl
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(os.environ["SUB_ROOT"]).resolve()
 TOKEN = os.environ["SUB_TOKEN"]
 PORT = int(os.environ["SUB_PORT"])
+CERT_FILE = os.environ["TLS_CERT_FILE"]
+KEY_FILE = os.environ["TLS_KEY_FILE"]
 FILES = {
     f"/{TOKEN}/": ("index.html", "text/html; charset=utf-8"),
     f"/{TOKEN}/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -492,13 +555,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"{self.client_address[0]} {fmt % args}", flush=True)
 
-http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(CERT_FILE, KEY_FILE)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
 PY
   chmod 755 "$WEB_APP"
   cat > "$WEB_ENV" <<EOF
 SUB_ROOT=${WEB_ROOT}
 SUB_TOKEN=${SUBSCRIPTION_TOKEN}
 SUB_PORT=${SUBSCRIPTION_PORT}
+TLS_CERT_FILE=${TLS_CERT_FILE}
+TLS_KEY_FILE=${TLS_KEY_FILE}
 EOF
   chmod 600 "$WEB_ENV"
   cat > "/etc/systemd/system/${WEB_SERVICE}" <<EOF
@@ -571,8 +640,8 @@ wait_listen() {
 
 show_result() {
   load_state || die "安装状态文件缺失"
-  local page="http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/"
-  local sub="http://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
+  local page="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/"
+  local sub="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
   printf '\n%b════════ Sudoku 安装结果 ════════%b\n' "$CYAN" "$RESET"
   printf '版本:       %s\n' "$(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
   printf '服务端口:   %s/tcp\n' "$SUDOKU_PORT"
@@ -605,6 +674,7 @@ install_all() {
   generate_keys
   # shellcheck disable=SC1090
   source "$KEYS_FILE"
+  setup_tls
   write_state
   write_server_config
   write_sudoku_service
@@ -617,7 +687,9 @@ install_all() {
   systemctl restart "$MSS_SERVICE" "$SUDOKU_SERVICE" "$WEB_SERVICE"
   wait_listen "$SUDOKU_PORT" || { journalctl -u "$SUDOKU_SERVICE" -n 30 --no-pager; die "Sudoku 未监听端口"; }
   wait_listen "$SUBSCRIPTION_PORT" || { journalctl -u "$WEB_SERVICE" -n 30 --no-pager; die "订阅服务未监听端口"; }
-  curl -fsS --max-time 5 "http://127.0.0.1:${SUBSCRIPTION_PORT}/healthz" | grep -qx ok || die "订阅服务健康检查失败"
+  curl -fsS --max-time 8 --cacert "$TLS_CERT_FILE" \
+    --connect-to "${PUBLIC_IP}:${SUBSCRIPTION_PORT}:127.0.0.1:${SUBSCRIPTION_PORT}" \
+    "https://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/healthz" | grep -qx ok || die "HTTPS 订阅服务健康检查失败"
   open_firewall_port "$SUDOKU_PORT"
   open_firewall_port "$SUBSCRIPTION_PORT"
   if [[ -n $previous_sudoku_port && $previous_sudoku_port != "$SUDOKU_PORT" ]]; then
@@ -652,7 +724,7 @@ uninstall_all() {
   require_root
   load_state || true
   systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" "$MSS_SERVICE" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "$MSS_SCRIPT" "$BIN"
+  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "$MSS_SCRIPT" "$CERTBOT_HOOK" "$BIN"
   rm -rf "$ETC_DIR" "$WEB_APP_DIR"
   systemctl daemon-reload
   if [[ -n ${SUDOKU_PORT:-} ]] && command -v ufw >/dev/null 2>&1; then ufw delete allow "${SUDOKU_PORT}/tcp" >/dev/null 2>&1 || true; fi
