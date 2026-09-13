@@ -29,6 +29,7 @@
 - **下载完整性校验**：核对 GitHub Release API 提供的 SHA-256 摘要。
 - **受信任的 IP HTTPS**：通过 Certbot 5.4+ 自动申请 Let's Encrypt 公网 IP 短期证书。
 - **自动续期**：启用 Certbot 定时器，续期后自动重载订阅服务。
+- **兼容新装 snapd**：主动识别 `/snap/bin/certbot`，当前终端无需重新登录或刷新 PATH。
 - **扫码与订阅导入**：输出 Mihomo YAML、订阅 URL、网页二维码和一键导入链接。
 - **配置预检**：启动前调用 Sudoku 自带的 `-test` 校验服务端与客户端配置。
 - **服务托管**：创建 `sudoku.service`、`sudoku-subscription.service` 和 `sudoku-mss.service`。

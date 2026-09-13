@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly ETC_DIR="/etc/sudoku"
@@ -33,6 +33,7 @@ readonly DEFAULT_TCP_MSS="${SUDOKU_TCP_MSS:-1200}"
 readonly DEFAULT_TLS_MODE="${SUDOKU_TLS_MODE:-letsencrypt}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RESET='\033[0m'
+CERTBOT_BIN=""
 info() { printf '%b[*]%b %s\n' "$CYAN" "$RESET" "$*"; }
 ok()   { printf '%b[OK]%b %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '%b[!]%b %s\n' "$YELLOW" "$RESET" "$*" >&2; }
@@ -356,9 +357,17 @@ EOF
 }
 
 certbot_is_current() {
-  command -v certbot >/dev/null 2>&1 || return 1
-  local version
-  version=$(certbot --version 2>&1 | sed -n 's/^certbot \([0-9][0-9.]*\).*/\1/p')
+  local candidate version
+  CERTBOT_BIN=""
+  candidate=$(command -v certbot 2>/dev/null || true)
+  for candidate in "$candidate" /snap/bin/certbot /usr/local/bin/certbot /usr/bin/certbot; do
+    if [[ -n $candidate && -x $candidate ]]; then
+      CERTBOT_BIN=$candidate
+      break
+    fi
+  done
+  [[ -n $CERTBOT_BIN ]] || return 1
+  version=$("$CERTBOT_BIN" --version 2>&1 | sed -n 's/^certbot \([0-9][0-9.]*\).*/\1/p')
   [[ -n $version ]] && python3 - "$version" <<'PY'
 import sys
 parts = tuple(int(x) for x in sys.argv[1].split('.')[:2])
@@ -384,6 +393,7 @@ install_current_certbot() {
   fi
   info "安装支持 IP 证书的新版 Certbot"
   snap install certbot --classic || snap refresh certbot
+  hash -r
   certbot_is_current || die "Certbot 版本低于 5.4"
 }
 
@@ -410,7 +420,7 @@ setup_tls() {
   if [[ ! -s $TLS_CERT_FILE || ! -s $TLS_KEY_FILE ]] || ! openssl x509 -checkend 43200 -noout -in "$TLS_CERT_FILE"; then
     port_in_use 80 && die "申请 IP 证书需要空闲的 80/tcp 端口"
     info "向 Let's Encrypt 申请受信任的公网 IP 短期证书"
-    certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
+    "$CERTBOT_BIN" certonly --non-interactive --agree-tos --register-unsafely-without-email \
       --preferred-profile shortlived --standalone --ip-address "$PUBLIC_IP"
   fi
   [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] || die "证书文件生成失败"
