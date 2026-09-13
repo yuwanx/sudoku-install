@@ -5,14 +5,16 @@
 ## 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) install
+bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+  https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) install
 ```
 
 指定端口：
 
 ```bash
 SUDOKU_PORT=34567 SUBSCRIPTION_PORT=18080 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) install
+  bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+    https://raw.githubusercontent.com/yuwanx/sudoku-install/main/sudoku-install.sh) install
 ```
 
 安装完成后终端会输出：
