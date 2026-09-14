@@ -31,7 +31,8 @@
 - **自动续期**：启用 Certbot 定时器，续期后自动重载订阅服务。
 - **兼容新装 snapd**：主动识别 `/snap/bin/certbot`，当前终端无需重新登录或刷新 PATH。
 - **双 ACME 验证路径**：80 端口不可用时自动改走 443/tcp 的 TLS-ALPN-01，无需停掉 80 上的网站。
-- **80/443 冲突兜底**：检测到两个标准端口均已占用时，不改动现有 Web 服务，自动生成 `api.qrserver.com` HTTPS 二维码链接，二维码内容为 `sudoku://` 原生短链。
+- **Clash Meta 直接扫码**：本机二维码编码为 `clashmeta://install-config`，扫码后直接拉取 HTTPS YAML 订阅。
+- **80/443 冲突兜底**：先探测现有 Webroot 申请证书；未找到 Webroot 时，可将外部 HTTPS 订阅地址编码为 `api.qrserver.com` 二维码。
 - **扫码与订阅导入**：输出 Mihomo YAML、订阅 URL、网页二维码和一键导入链接。
 - **配置预检**：启动前调用 Sudoku 自带的 `-test` 校验服务端与客户端配置。
 - **服务托管**：创建 `sudoku.service`、`sudoku-subscription.service` 和 `sudoku-mss.service`。
@@ -79,6 +80,7 @@ SUDOKU_PORT=443 SUBSCRIPTION_PORT=18080 SERVER_IP=203.0.113.10 \
 | `SUDOKU_TCP_MSS` | `1200` | Sudoku 端口 MSS；设为 `0` 可关闭 |
 | `SUDOKU_TLS_MODE` | `letsencrypt` | 可选 `letsencrypt` / `self-signed` |
 | `SUDOKU_CERTBOT_WEBROOT` | 自动探测 | 80 端口已有 Web 服务时的站点根目录 |
+| `SUDOKU_EXTERNAL_SUBSCRIPTION_URL` | 空 | 80/443 均被占用且无 Webroot 时，指定现有的 HTTPS YAML 订阅地址，用于 Clash Meta 直接扫码 |
 | `SUDOKU_FORCE_DOWNLOAD` | `0` | 设为 `1` 强制重新下载当前版本 |
 
 > 自签模式也会使用 HTTPS，但扫码设备需先信任该证书；默认的 Let's Encrypt IP 证书可被主流系统直接验证。
@@ -100,17 +102,20 @@ Mihomo YAML: /etc/sudoku/mihomo.yaml
 3. 或直接复制订阅链接到订阅管理页面；
 4. 更新订阅后选择生成的 `sudoku-PORT` 节点。
 
-正常模式下二维码由服务器本机的 `qrencode` 生成，节点信息不会提交给第三方二维码网站。订阅 URL 含客户端连接密钥，应按密码级别保存。
+正常模式下二维码由服务器本机的 `qrencode` 生成，内容是 `clashmeta://install-config?url=...` 导入链接；Clash Meta 扫码后会直接拉取 HTTPS YAML。节点信息不会提交给第三方二维码网站。订阅 URL 含客户端连接密钥，应按密码级别保存。
 
 如果脚本检测到 `80/tcp` 和 `443/tcp` 同时被占用，则输出：
 
 ```text
-导入方式:   外部 HTTPS 二维码（二维码内容为 sudoku:// 原生短链）
+导入方式:   外部 HTTPS 二维码（二维码内容为 Clash Meta 导入链接）
+Clash Meta: clashmeta://install-config?url=https%3A%2F%2F...
 二维码图片: https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=...
 Mihomo YAML: /etc/sudoku/mihomo.yaml
 ```
 
-此模式不启动 `sudoku-subscription.service`，不会抢占现有 Web 端口；打开二维码图片地址后，用支持 Sudoku 的 Mihomo 客户端扫码导入。节点短链会作为 HTTPS 查询参数提交给二维码服务，本地完整配置仍保存在 `/etc/sudoku/mihomo.yaml`。
+当 `80/443` 都被占用时，脚本仍会优先尝试已有 Web 服务的 Webroot；此路径会拿到受信任的 IP 证书并启动本机 HTTPS 订阅服务，二维码可直接导入 Clash Meta。若 Webroot 位于非标准目录，指定 `SUDOKU_CERTBOT_WEBROOT` 即可。
+
+若服务器没有可用 Webroot，设置 `SUDOKU_EXTERNAL_SUBSCRIPTION_URL` 为已存在的 HTTPS YAML 地址，外部二维码会编码 `clashmeta://install-config` 并直接导入。外部二维码服务仅生成图片，不托管 YAML 文件。
 
 ## 管理命令
 
@@ -149,6 +154,7 @@ sudoku-manager uninstall   # 卸载，保留历史备份
 | `/etc/sudoku/client.config.json` | 原生客户端配置 |
 | `/etc/sudoku/mihomo.yaml` | Mihomo 完整配置 |
 | `/etc/sudoku/external-qr.url` | 80/443 均占用时生成的外部二维码图片地址 |
+| `/etc/sudoku/clash-meta-import.url` | Clash Meta 直接导入链接 |
 | `/etc/sudoku/subscription/` | 令牌化网页、YAML 与二维码 |
 | `/etc/letsencrypt/live/IP/` | 公网 IP 证书与私钥 |
 | `/var/backups/sudoku-install/` | 重装前备份 |
@@ -197,12 +203,12 @@ journalctl -u sudoku -u sudoku-subscription -n 100 --no-pager
 
 1. `80/tcp` 空闲：Certbot HTTP-01；
 2. `80/tcp` 已占用、`443/tcp` 空闲：先尝试现有站点 Webroot，失败后使用 Lego TLS-ALPN-01；
-3. `80/tcp` 与 `443/tcp` 均已占用：保留现有 Web 服务，切换到 `api.qrserver.com` 外部 HTTPS 二维码模式。
+3. `80/tcp` 与 `443/tcp` 均已占用：继续探测 Webroot；成功则通过 Webroot 验证证书并启动本机 HTTPS 订阅。Webroot 不可用时，使用 `SUDOKU_EXTERNAL_SUBSCRIPTION_URL` 的外部 HTTPS YAML 生成 Clash Meta 直接导入二维码。
 
-前两种路径生成受信任的公网 IP HTTPS 订阅页；第三种路径直接把 `sudoku://` 原生短链编码为二维码，不再部署本机订阅页。
+前两种路径和第三种的 Webroot 分支均生成受信任的公网 IP HTTPS 订阅页；二维码统一使用 Clash Meta 导入链接。
 
 ```bash
-SUDOKU_CERTBOT_WEBROOT=/var/www/html bash <(fetch_sudoku_installer) install
+SUDOKU_CERTBOT_WEBROOT=/var/www/html sudoku-manager install
 ```
 
 可先用 `ss -lntp 'sport = :80'` 确认监听程序，并检查其站点配置中的 `root`/`DocumentRoot`。同时确保云安全组允许 `80/tcp`。

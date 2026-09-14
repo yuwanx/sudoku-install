@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.3.2"
+readonly SCRIPT_VERSION="1.3.3"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly MANAGER_BIN="/usr/local/bin/sudoku-manager"
@@ -16,6 +16,7 @@ readonly STATE_FILE="${ETC_DIR}/install.env"
 readonly CLIENT_FILE="${ETC_DIR}/client.config.json"
 readonly MIHOMO_FILE="${ETC_DIR}/mihomo.yaml"
 readonly EXTERNAL_QR_FILE="${ETC_DIR}/external-qr.url"
+readonly CLASH_IMPORT_FILE="${ETC_DIR}/clash-meta-import.url"
 readonly VERSION_FILE="${ETC_DIR}/version"
 readonly WEB_ROOT="${ETC_DIR}/subscription"
 readonly WEB_ENV="${ETC_DIR}/subscription.env"
@@ -271,6 +272,7 @@ HTTPMASK_PATH_ROOT=${HTTPMASK_PATH_ROOT}
 TCP_MSS=${TCP_MSS}
 SUBSCRIPTION_SCHEME=${SUBSCRIPTION_SCHEME}
 SUBSCRIPTION_MODE=${SUBSCRIPTION_MODE}
+EXTERNAL_QR_MODE=${EXTERNAL_QR_MODE}
 TLS_CERT_FILE=${TLS_CERT_FILE}
 TLS_KEY_FILE=${TLS_KEY_FILE}
 ACME_METHOD=${ACME_METHOD}
@@ -527,6 +529,7 @@ setup_tls() {
   local webroot=""
   SUBSCRIPTION_SCHEME=https
   SUBSCRIPTION_MODE=https
+  EXTERNAL_QR_MODE=none
   ACME_METHOD=self-signed
   if [[ $DEFAULT_TLS_MODE == self-signed ]]; then
     local cert_dir="${ETC_DIR}/tls"
@@ -542,15 +545,6 @@ setup_tls() {
   fi
   [[ $DEFAULT_TLS_MODE == letsencrypt ]] || die "SUDOKU_TLS_MODE 仅支持 letsencrypt/self-signed"
   [[ $PUBLIC_IP =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "IP 证书模式当前需要 IPv4 地址"
-  if port_in_use 80 && port_in_use 443; then
-    SUBSCRIPTION_MODE=external-qr
-    SUBSCRIPTION_SCHEME=external
-    TLS_CERT_FILE=""
-    TLS_KEY_FILE=""
-    ACME_METHOD=external-qr
-    warn "检测到 80/tcp 与 443/tcp 均已占用，使用 api.qrserver.com 生成 sudoku:// 导入二维码"
-    return 0
-  fi
   TLS_CERT_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/fullchain.pem"
   TLS_KEY_FILE="/etc/letsencrypt/live/${PUBLIC_IP}/privkey.pem"
   open_firewall_port 80
@@ -577,7 +571,13 @@ setup_tls() {
         TLS_CERT_FILE=""
         TLS_KEY_FILE=""
         ACME_METHOD=external-qr
-        warn "80/tcp 与 443/tcp 均已占用，使用 api.qrserver.com 生成 sudoku:// 导入二维码"
+        if [[ -n ${SUDOKU_EXTERNAL_SUBSCRIPTION_URL:-} ]]; then
+          [[ $SUDOKU_EXTERNAL_SUBSCRIPTION_URL == https://* ]] || die "SUDOKU_EXTERNAL_SUBSCRIPTION_URL 必须使用 https://"
+          EXTERNAL_QR_MODE=clash-meta
+        else
+          EXTERNAL_QR_MODE=native
+        fi
+        warn "80/tcp 与 443/tcp 均已占用且未找到可用 Webroot，切换至外部二维码模式"
         return 0
       fi
       issue_lego_ip_certificate
@@ -593,6 +593,13 @@ EOF
   fi
   [[ -s $TLS_CERT_FILE && -s $TLS_KEY_FILE ]] || die "证书文件生成失败"
   ok "公网 IP HTTPS 证书有效期至：$(openssl x509 -enddate -noout -in "$TLS_CERT_FILE" | cut -d= -f2-)"
+}
+
+make_clash_meta_import_link() {
+  python3 - "$1" <<'PY'
+import sys, urllib.parse
+print("clashmeta://install-config?url=" + urllib.parse.quote(sys.argv[1], safe=""))
+PY
 }
 
 write_client_exports() {
@@ -668,7 +675,15 @@ EOF
   [[ -n $SHORT_LINK ]] || die "生成 sudoku:// 链接失败"
 
   if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
-    encoded=$(python3 - "$SHORT_LINK" <<'PY'
+    local qr_payload="$SHORT_LINK"
+    if [[ ${EXTERNAL_QR_MODE:-native} == clash-meta ]]; then
+      qr_payload=$(make_clash_meta_import_link "$SUDOKU_EXTERNAL_SUBSCRIPTION_URL")
+      printf '%s\n' "$qr_payload" > "$CLASH_IMPORT_FILE"
+      chmod 600 "$CLASH_IMPORT_FILE"
+    else
+      rm -f "$CLASH_IMPORT_FILE"
+    fi
+    encoded=$(python3 - "$qr_payload" <<'PY'
 import sys, urllib.parse
 print(urllib.parse.quote(sys.argv[1], safe=""))
 PY
@@ -681,17 +696,14 @@ PY
 
   rm -f "$EXTERNAL_QR_FILE"
   subscription_url="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
+  clash_url=$(make_clash_meta_import_link "$subscription_url")
+  printf '%s\n' "$clash_url" > "$CLASH_IMPORT_FILE"
+  chmod 600 "$CLASH_IMPORT_FILE"
 
   mkdir -p "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}"
   install -m 0600 "$MIHOMO_FILE" "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/config.yaml"
-  qrencode -t SVG -m 2 -o "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/qr.svg" "$subscription_url"
+  qrencode -t SVG -m 2 -o "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/qr.svg" "$clash_url"
   chmod 600 "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/qr.svg"
-
-  clash_url=$(python3 - "$subscription_url" <<'PY'
-import sys, urllib.parse
-print("clash://install-config?url=" + urllib.parse.quote(sys.argv[1], safe=""))
-PY
-)
   python3 - "$subscription_url" "$clash_url" "$SHORT_LINK" "$SUDOKU_PORT" > "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/index.html" <<'PY'
 import html, sys
 sub, clash, short, port = map(html.escape, sys.argv[1:])
@@ -699,9 +711,9 @@ print(f'''<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sudoku Mihomo 导入</title><style>
 body{{font-family:system-ui,sans-serif;background:#0b1020;color:#e9eefb;margin:0;padding:28px}}main{{max-width:680px;margin:auto;background:#151d33;border-radius:18px;padding:28px;box-shadow:0 16px 50px #0008}}h1{{margin-top:0}}img{{display:block;width:min(78vw,330px);background:white;padding:12px;border-radius:12px;margin:22px auto}}code{{display:block;overflow-wrap:anywhere;background:#09101f;padding:12px;border-radius:9px}}a,button{{display:inline-block;margin:8px 6px 8px 0;padding:11px 16px;border:0;border-radius:9px;background:#5c7cfa;color:white;text-decoration:none;font-weight:650;cursor:pointer}}.muted{{color:#a9b4ca;font-size:.92rem}}</style></head>
-<body><main><h1>Sudoku → Mihomo</h1><p>使用代理软件内的扫码功能扫描下方二维码，或复制订阅链接导入。</p>
+<body><main><h1>Sudoku → Mihomo</h1><p>使用 Clash Meta 扫描下方二维码即可导入；也可复制订阅链接手动添加。</p>
 <img src="qr.svg" alt="Mihomo subscription QR code"><p><a href="{clash}">尝试一键导入</a><button onclick="navigator.clipboard.writeText('{sub}')">复制订阅链接</button></p>
-<code>{sub}</code><p class="muted">Sudoku 服务端口：{port}。二维码内容就是上面的订阅地址，不经过第三方二维码服务。</p>
+<code>{sub}</code><p class="muted">Sudoku 服务端口：{port}。二维码内容为 Clash Meta 导入链接，指向上面的 HTTPS 订阅地址；二维码由本机生成。</p>
 <details><summary>Sudoku 原生短链</summary><code>{short}</code></details></main></body></html>''')
 PY
   chmod 600 "${WEB_ROOT}/${SUBSCRIPTION_TOKEN}/index.html"
@@ -839,19 +851,27 @@ wait_listen() {
 
 show_result() {
   load_state || die "安装状态文件缺失"
-  local page sub qr_url
+  local page sub qr_url import_url
   printf '\n%b════════ Sudoku 安装结果 ════════%b\n' "$CYAN" "$RESET"
   printf '版本:       %s\n' "$(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
   printf '服务端口:   %s/tcp\n' "$SUDOKU_PORT"
   if [[ ${SUBSCRIPTION_MODE:-https} == external-qr ]]; then
     qr_url=$(cat "$EXTERNAL_QR_FILE" 2>/dev/null || true)
-    printf '导入方式:   外部 HTTPS 二维码（二维码内容为 sudoku:// 原生短链）\n'
+    import_url=$(cat "$CLASH_IMPORT_FILE" 2>/dev/null || true)
+    if [[ ${EXTERNAL_QR_MODE:-native} == clash-meta ]]; then
+      printf '导入方式:   外部 HTTPS 二维码（二维码内容为 Clash Meta 导入链接）\n'
+      printf 'Clash Meta: %s\n' "$import_url"
+    else
+      printf '导入方式:   外部 HTTPS 二维码（二维码内容为 sudoku:// 原生短链）\n'
+      printf '提示:       设置 SUDOKU_EXTERNAL_SUBSCRIPTION_URL 后可生成 Clash Meta 直接导入二维码\n'
+    fi
     printf '二维码图片: %s\n' "$qr_url"
   else
     page="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/"
     sub="${SUBSCRIPTION_SCHEME}://${PUBLIC_IP}:${SUBSCRIPTION_PORT}/${SUBSCRIPTION_TOKEN}/config.yaml"
     printf '扫码页面:   %s\n' "$page"
     printf '订阅链接:   %s\n' "$sub"
+    printf 'Clash Meta: %s\n' "$(cat "$CLASH_IMPORT_FILE" 2>/dev/null || true)"
   fi
   printf 'Mihomo YAML: %s\n' "$MIHOMO_FILE"
   printf '客户端 JSON: %s\n' "$CLIENT_FILE"
