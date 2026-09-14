@@ -5,10 +5,11 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.3.3"
+readonly SCRIPT_VERSION="1.3.4"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly MANAGER_BIN="/usr/local/bin/sudoku-manager"
+readonly MANAGER_COMPAT_BIN="/usr/bin/sudoku-manager"
 readonly ETC_DIR="/etc/sudoku"
 readonly CONFIG_FILE="${ETC_DIR}/server.config.json"
 readonly KEYS_FILE="${ETC_DIR}/keys.env"
@@ -61,13 +62,22 @@ require_root() {
 }
 
 install_manager() {
-  local source_file="${BASH_SOURCE[0]}" tmp
+  local source_file="${BASH_SOURCE[0]:-$0}" tmp
   [[ -r $source_file ]] || die "读取当前安装脚本失败"
   tmp=$(mktemp "${MANAGER_BIN}.tmp.XXXXXX")
   cat "$source_file" > "$tmp"
   chmod 0755 "$tmp"
   mv -f "$tmp" "$MANAGER_BIN"
-  ok "管理命令已安装：${MANAGER_BIN}"
+  ln -sfn "$MANAGER_BIN" "$MANAGER_COMPAT_BIN"
+  hash -r
+  "$MANAGER_BIN" help >/dev/null || die "管理命令自检失败"
+  ok "管理命令已安装：sudoku-manager（${MANAGER_BIN}）"
+}
+
+install_manager_only() {
+  require_root
+  install_manager
+  "$MANAGER_BIN" help
 }
 
 detect_arch() {
@@ -1018,7 +1028,7 @@ uninstall_all() {
   require_root
   load_state || true
   systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" "$MSS_SERVICE" "$LEGO_RENEW_TIMER" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_TIMER}" "$MSS_SCRIPT" "$LEGO_RENEW_SCRIPT" "$CERTBOT_HOOK" "$LEGO_BIN" "$BIN" "$MANAGER_BIN"
+  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_TIMER}" "$MSS_SCRIPT" "$LEGO_RENEW_SCRIPT" "$CERTBOT_HOOK" "$LEGO_BIN" "$BIN" "$MANAGER_BIN" "$MANAGER_COMPAT_BIN"
   rm -rf "$ETC_DIR" "$WEB_APP_DIR"
   systemctl daemon-reload
   if [[ -n ${SUDOKU_PORT:-} ]] && command -v ufw >/dev/null 2>&1; then ufw delete allow "${SUDOKU_PORT}/tcp" >/dev/null 2>&1 || true; fi
@@ -1041,6 +1051,7 @@ Sudoku 服务端管理脚本 v${SCRIPT_VERSION}
   status               查看服务当前状态、导入地址和配置路径
   log [参数]           查看服务日志（例：$(basename "$0") log -n 100）
   qr                   显示当前扫码导入信息
+  install-manager      仅安装或修复 sudoku-manager 管理命令（需要 root）
   menu                 打开交互式管理菜单
   help                 显示此帮助菜单
 
@@ -1078,6 +1089,7 @@ case "${1:-help}" in
   start|stop|restart) service_action "$1" ;;
   log|logs) show_logs "$@" ;;
   qr) show_result ;;
+  install-manager) install_manager_only ;;
   uninstall) uninstall_all ;;
   menu) menu ;;
   help|-h|--help) print_help ;;

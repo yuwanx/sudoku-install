@@ -143,6 +143,14 @@ sudoku-manager log -n 100  # 查看最近日志
 sudoku-manager uninstall   # 卸载，保留历史备份
 ```
 
+脚本同时创建 `/usr/bin/sudoku-manager` 链接并执行 `help` 自检。若旧版本安装未写入该命令，运行一次修复命令即可，不会重装服务：
+
+```bash
+bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+  -H 'Accept: application/vnd.github.raw+json' \
+  'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main') install-manager
+```
+
 直接运行脚本默认显示帮助菜单；需要交互式数字菜单时使用 `menu`。
 
 ## 文件与服务
