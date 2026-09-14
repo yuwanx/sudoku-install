@@ -5,9 +5,10 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.3.1"
+readonly SCRIPT_VERSION="1.3.2"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
 readonly BIN="/usr/local/bin/sudoku"
+readonly MANAGER_BIN="/usr/local/bin/sudoku-manager"
 readonly ETC_DIR="/etc/sudoku"
 readonly CONFIG_FILE="${ETC_DIR}/server.config.json"
 readonly KEYS_FILE="${ETC_DIR}/keys.env"
@@ -56,6 +57,16 @@ trap on_error ERR
 require_root() {
   [[ ${EUID} -eq 0 ]] || die "请使用 root 运行此脚本"
   [[ -d /run/systemd/system ]] || die "当前系统未运行 systemd"
+}
+
+install_manager() {
+  local source_file="${BASH_SOURCE[0]}" tmp
+  [[ -r $source_file ]] || die "读取当前安装脚本失败"
+  tmp=$(mktemp "${MANAGER_BIN}.tmp.XXXXXX")
+  cat "$source_file" > "$tmp"
+  chmod 0755 "$tmp"
+  mv -f "$tmp" "$MANAGER_BIN"
+  ok "管理命令已安装：${MANAGER_BIN}"
 }
 
 detect_arch() {
@@ -855,6 +866,7 @@ show_result() {
 install_all() {
   local previous_sudoku_port="" previous_subscription_port=""
   require_root; detect_arch; install_dependencies
+  install_manager
   backup_existing
   if [[ -r $STATE_FILE ]]; then
     previous_sudoku_port=$(sed -n 's/^SUDOKU_PORT=//p' "$STATE_FILE" | head -n1)
@@ -934,6 +946,7 @@ install_all() {
 update_binary() {
   require_root; detect_arch; install_dependencies
   [[ -r $CONFIG_FILE ]] || die "尚未安装 Sudoku"
+  install_manager
   backup_existing
   download_binary
   "$BIN" -c "$CONFIG_FILE" -test >/dev/null 2>&1 || die "更新后二进制未通过现有配置校验"
@@ -985,7 +998,7 @@ uninstall_all() {
   require_root
   load_state || true
   systemctl disable --now "$SUDOKU_SERVICE" "$WEB_SERVICE" "$MSS_SERVICE" "$LEGO_RENEW_TIMER" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_TIMER}" "$MSS_SCRIPT" "$LEGO_RENEW_SCRIPT" "$CERTBOT_HOOK" "$LEGO_BIN" "$BIN"
+  rm -f "/etc/systemd/system/${SUDOKU_SERVICE}" "/etc/systemd/system/${WEB_SERVICE}" "/etc/systemd/system/${MSS_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_SERVICE}" "/etc/systemd/system/${LEGO_RENEW_TIMER}" "$MSS_SCRIPT" "$LEGO_RENEW_SCRIPT" "$CERTBOT_HOOK" "$LEGO_BIN" "$BIN" "$MANAGER_BIN"
   rm -rf "$ETC_DIR" "$WEB_APP_DIR"
   systemctl daemon-reload
   if [[ -n ${SUDOKU_PORT:-} ]] && command -v ufw >/dev/null 2>&1; then ufw delete allow "${SUDOKU_PORT}/tcp" >/dev/null 2>&1 || true; fi

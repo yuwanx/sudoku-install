@@ -114,28 +114,28 @@ Mihomo YAML: /etc/sudoku/mihomo.yaml
 
 ## 管理命令
 
-先定义下载函数：
+首次安装仍使用一键命令：
 
 ```bash
-fetch_sudoku_installer() {
-  curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
-    -H 'Accept: application/vnd.github.raw+json' \
-    'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main'
-}
+bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+  -H 'Accept: application/vnd.github.raw+json' \
+  'https://api.github.com/repos/yuwanx/sudoku-install/contents/sudoku-install.sh?ref=main') install
 ```
 
+安装或更新时，脚本会自动写入 `/usr/local/bin/sudoku-manager`。之后无需再定义下载函数，直接使用：
+
 ```bash
-bash <(fetch_sudoku_installer) help        # 显示命令帮助
-bash <(fetch_sudoku_installer) menu        # 打开交互菜单
-bash <(fetch_sudoku_installer) install     # 安装或重装
-bash <(fetch_sudoku_installer) update      # 更新 Sudoku 内核并保留配置
-bash <(fetch_sudoku_installer) show        # 查看服务状态与当前链接
-bash <(fetch_sudoku_installer) qr          # 再次显示扫码/订阅地址
-bash <(fetch_sudoku_installer) restart     # 重启服务
-bash <(fetch_sudoku_installer) stop        # 停止服务
-bash <(fetch_sudoku_installer) start       # 启动服务
-bash <(fetch_sudoku_installer) log -n 100  # 查看最近日志
-bash <(fetch_sudoku_installer) uninstall   # 卸载，保留历史备份
+sudoku-manager help        # 显示命令帮助
+sudoku-manager menu        # 打开交互菜单
+sudoku-manager install     # 安装或重装
+sudoku-manager update      # 更新 Sudoku 内核并保留配置
+sudoku-manager show        # 查看服务状态与当前链接
+sudoku-manager qr          # 再次显示扫码/订阅地址
+sudoku-manager restart     # 重启服务
+sudoku-manager stop        # 停止服务
+sudoku-manager start       # 启动服务
+sudoku-manager log -n 100  # 查看最近日志
+sudoku-manager uninstall   # 卸载，保留历史备份
 ```
 
 直接运行脚本默认显示帮助菜单；需要交互式数字菜单时使用 `menu`。
