@@ -125,7 +125,8 @@ fetch_sudoku_installer() {
 ```
 
 ```bash
-bash <(fetch_sudoku_installer)             # 交互菜单
+bash <(fetch_sudoku_installer) help        # 显示命令帮助
+bash <(fetch_sudoku_installer) menu        # 打开交互菜单
 bash <(fetch_sudoku_installer) install     # 安装或重装
 bash <(fetch_sudoku_installer) update      # 更新 Sudoku 内核并保留配置
 bash <(fetch_sudoku_installer) show        # 查看服务状态与当前链接
@@ -136,6 +137,8 @@ bash <(fetch_sudoku_installer) start       # 启动服务
 bash <(fetch_sudoku_installer) log -n 100  # 查看最近日志
 bash <(fetch_sudoku_installer) uninstall   # 卸载，保留历史备份
 ```
+
+直接运行脚本默认显示帮助菜单；需要交互式数字菜单时使用 `menu`。
 
 ## 文件与服务
 

@@ -993,23 +993,52 @@ uninstall_all() {
   ok "卸载完成；备份目录未删除：${BACKUP_ROOT}"
 }
 
+print_help() {
+  cat <<EOF
+Sudoku 服务端管理脚本 v${SCRIPT_VERSION}
+用法：$(basename "$0") [命令]
+
+可用命令：
+  install              安装或重装 Sudoku 服务（需要 root）
+  update               更新 Sudoku 内核并保留现有配置（需要 root）
+  uninstall            卸载 Sudoku 服务，保留历史备份（需要 root）
+  start                启动 Sudoku 服务（需要 root）
+  stop                 停止 Sudoku 服务（需要 root）
+  restart              重启 Sudoku 服务（需要 root）
+  status               查看服务当前状态、导入地址和配置路径
+  log [参数]           查看服务日志（例：$(basename "$0") log -n 100）
+  qr                   显示当前扫码导入信息
+  menu                 打开交互式管理菜单
+  help                 显示此帮助菜单
+
+示例：bash $(basename "$0") install
+EOF
+}
+
 menu() {
   while true; do
-    printf '\n1) 安装/重装  2) 更新内核  3) 查看状态与链接  4) 日志  0) 卸载  q) 退出\n'
+    printf '\n%b════════ Sudoku 服务端管理 ════════%b\n' "$CYAN" "$RESET"
+    printf '1) 安装/重装    2) 更新内核    3) 查看状态/二维码\n'
+    printf '4) 查看日志     5) 启动        6) 停止        7) 重启\n'
+    printf '0) 卸载         h) 命令帮助    q) 退出\n'
     read -r -p '请选择: ' choice
     case "$choice" in
       1) install_all ;;
       2) update_binary ;;
       3) show_status ;;
-      4) journalctl -u "$SUDOKU_SERVICE" -u "$WEB_SERVICE" -n 100 --no-pager ;;
+      4) show_logs -n 100 ;;
+      5) service_action start ;;
+      6) service_action stop ;;
+      7) service_action restart ;;
       0) read -r -p '确认卸载？[y/N] ' ans; [[ ${ans,,} == y ]] && uninstall_all ;;
+      h|H|help) print_help ;;
       q|Q) exit 0 ;;
       *) warn "无效选择" ;;
     esac
   done
 }
 
-case "${1:-menu}" in
+case "${1:-help}" in
   install) install_all ;;
   update) update_binary ;;
   show|status) show_status ;;
@@ -1018,5 +1047,6 @@ case "${1:-menu}" in
   qr) show_result ;;
   uninstall) uninstall_all ;;
   menu) menu ;;
-  *) die "用法：$0 [install|update|show|start|stop|restart|log|qr|uninstall|menu]" ;;
+  help|-h|--help) print_help ;;
+  *) print_help >&2; die "未知命令：$1" ;;
 esac
