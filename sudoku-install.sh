@@ -5,8 +5,9 @@
 set -Eeuo pipefail
 umask 077
 
-readonly SCRIPT_VERSION="1.3.4"
+readonly SCRIPT_VERSION="1.3.5"
 readonly SUDOKU_REPO="${SUDOKU_REPO:-SUDOKU-ASCII/sudoku}"
+readonly INSTALLER_REPO="${SUDOKU_INSTALLER_REPO:-yuwanx/sudoku-install}"
 readonly BIN="/usr/local/bin/sudoku"
 readonly MANAGER_BIN="/usr/local/bin/sudoku-manager"
 readonly MANAGER_COMPAT_BIN="/usr/bin/sudoku-manager"
@@ -62,10 +63,14 @@ require_root() {
 }
 
 install_manager() {
-  local source_file="${BASH_SOURCE[0]:-$0}" tmp
-  [[ -r $source_file ]] || die "读取当前安装脚本失败"
+  local tmp manager_url
   tmp=$(mktemp "${MANAGER_BIN}.tmp.XXXXXX")
-  cat "$source_file" > "$tmp"
+  manager_url="https://api.github.com/repos/${INSTALLER_REPO}/contents/sudoku-install.sh?ref=main"
+  info "下载管理命令脚本"
+  curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+    -H 'Accept: application/vnd.github.raw+json' "$manager_url" -o "$tmp"
+  [[ -s $tmp ]] || die "管理命令脚本下载为空"
+  bash -n "$tmp" || die "管理命令脚本语法校验失败"
   chmod 0755 "$tmp"
   mv -f "$tmp" "$MANAGER_BIN"
   ln -sfn "$MANAGER_BIN" "$MANAGER_COMPAT_BIN"

@@ -143,7 +143,7 @@ sudoku-manager log -n 100  # 查看最近日志
 sudoku-manager uninstall   # 卸载，保留历史备份
 ```
 
-脚本同时创建 `/usr/bin/sudoku-manager` 链接并执行 `help` 自检。若旧版本安装未写入该命令，运行一次修复命令即可，不会重装服务：
+脚本从 GitHub 重新下载完整管理脚本到 `/usr/local/bin/sudoku-manager`，同时创建 `/usr/bin/sudoku-manager` 链接并执行 `help` 自检。若旧版本安装未写入该命令，运行一次修复命令即可，不会重装服务：
 
 ```bash
 bash <(curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
